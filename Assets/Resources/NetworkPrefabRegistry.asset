@@ -1,0 +1,19 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ce3a35cc1a9ccab4fa3a7cce87c6a8cd, type: 3}
+  m_Name: NetworkPrefabRegistry
+  m_EditorClassIdentifier: NetPulse.Runtime::NetPulse.NetworkPrefabRegistry
+  _entries:
+  - _id: 1
+    _guid: f6ae12306c5f06842823aaaae82f9cce
+    _prefab: {fileID: 1802542209738646804, guid: f6ae12306c5f06842823aaaae82f9cce, type: 3}
+  _nextId: 2

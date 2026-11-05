@@ -1,0 +1,27 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 84a3bafc1e2ce1c4c906f438b36180c3, type: 3}
+  m_Name: NetPulseSettings
+  m_EditorClassIdentifier: NetPulse.Runtime::NetPulse.NetPulseSettings
+  _host: 127.0.0.1
+  _port: 5055
+  _appId: 
+  _appVersion: 1.0
+  _connectionKey: NetPulse
+  _defaultNickName: 
+  _persistUserId: 1
+  _sendRate: 20
+  _serializationRate: 10
+  _requestTimeout: 10
+  _runInBackground: 1
+  _logVerbose: 0
+  _prefabRegistry: {fileID: 11400000, guid: 1a99c5b44ced22d42a977b35d39c7016, type: 2}

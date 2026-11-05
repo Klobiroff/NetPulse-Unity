@@ -1,0 +1,14 @@
+{
+    "name": "NetPulse.Tests.Editor",
+    "rootNamespace": "NetPulse.Tests.Editor",
+    "references": [ "NetPulse.Runtime", "NetPulse.Editor", "NetPulse.Common", "UnityEngine.TestRunner", "UnityEditor.TestRunner" ],
+    "includePlatforms": [ "Editor" ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [ "nunit.framework.dll" ],
+    "autoReferenced": false,
+    "defineConstraints": [ "UNITY_INCLUDE_TESTS" ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
