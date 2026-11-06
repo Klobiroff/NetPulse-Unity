@@ -2,6 +2,13 @@ using UnityEngine;
 
 namespace NetPulse
 {
+    public enum StatsCollection
+    {
+        Auto,
+        Always,
+        Never
+    }
+
     [CreateAssetMenu(fileName = "NetPulseSettings", menuName = "NetPulse/Settings")]
     public sealed class NetPulseSettings : ScriptableObject
     {
@@ -22,11 +29,15 @@ namespace NetPulse
 
         [Header("Rates")]
         [SerializeField, Range(1, 60)] private int _sendRate = 20;
-        [SerializeField, Range(1, 60)] private int _serializationRate = 10;
+        [Tooltip("0 = use the server tick rate.")]
+        [SerializeField, Range(0, 60)] private int _serializationRate = 0;
         [SerializeField, Min(1f)] private float _requestTimeout = 10f;
 
         [Header("Behaviour")]
         [SerializeField] private bool _runInBackground = true;
+        [SerializeField] private bool _autoSyncScene = true;
+        [Tooltip("Auto = collect traffic statistics in the editor and development builds only.")]
+        [SerializeField] private StatsCollection _collectStats = StatsCollection.Auto;
         [SerializeField] private bool _logVerbose;
         [SerializeField] private NetworkPrefabRegistry _prefabRegistry;
 
@@ -112,6 +123,18 @@ namespace NetPulse
         {
             get => _runInBackground;
             set => _runInBackground = value;
+        }
+
+        public bool AutoSyncScene
+        {
+            get => _autoSyncScene;
+            set => _autoSyncScene = value;
+        }
+
+        public bool CollectStats
+        {
+            get => _collectStats == StatsCollection.Always || (_collectStats == StatsCollection.Auto && (Application.isEditor || Debug.isDebugBuild));
+            set => _collectStats = value ? StatsCollection.Always : StatsCollection.Never;
         }
 
         public bool LogVerbose

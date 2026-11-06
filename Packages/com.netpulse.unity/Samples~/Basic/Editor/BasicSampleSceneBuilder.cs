@@ -40,9 +40,44 @@ namespace NetPulse.Samples.Basic.Editor
             serialized.FindProperty("_playerPrefab").objectReferenceValue = prefab;
             serialized.ApplyModifiedProperties();
 
-            var scenePath = Folder + "/BasicSample.unity";
-            EditorSceneManager.SaveScene(scene, scenePath);
-            Debug.Log("[NetPulse] Basic sample scene created at " + scenePath);
+            var mainPath = Folder + "/BasicSample.unity";
+            EditorSceneManager.SaveScene(scene, mainPath);
+            var arenaPath = BuildArenaScene();
+            AddToBuildSettings(mainPath, arenaPath);
+            EditorSceneManager.OpenScene(mainPath);
+            Debug.Log($"[NetPulse] Basic sample scenes created: {mainPath} and {arenaPath} (both added to Build Settings).");
+        }
+
+        private static string BuildArenaScene()
+        {
+            var scene = EditorSceneManager.NewScene(NewSceneSetup.DefaultGameObjects, NewSceneMode.Single);
+            var ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
+            ground.name = "Arena Ground";
+            ground.transform.localScale = new Vector3(2f, 1f, 2f);
+            var camera = Camera.main;
+            if (camera != null)
+            {
+                camera.transform.position = new Vector3(0f, 12f, -10f);
+                camera.transform.rotation = Quaternion.Euler(50f, 0f, 0f);
+            }
+
+            var path = Folder + "/BasicSampleArena.unity";
+            EditorSceneManager.SaveScene(scene, path);
+            return path;
+        }
+
+        private static void AddToBuildSettings(params string[] paths)
+        {
+            var scenes = new System.Collections.Generic.List<EditorBuildSettingsScene>(EditorBuildSettings.scenes);
+            foreach (var path in paths)
+            {
+                if (!scenes.Exists(existing => existing.path == path))
+                {
+                    scenes.Add(new EditorBuildSettingsScene(path, true));
+                }
+            }
+
+            EditorBuildSettings.scenes = scenes.ToArray();
         }
 
         private static void CreateTakeoverCube()
@@ -64,7 +99,8 @@ namespace NetPulse.Samples.Basic.Editor
         {
             var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
             go.name = "SamplePlayer";
-            go.AddComponent<NetworkObject>();
+            var networkObject = go.AddComponent<NetworkObject>();
+            networkObject.PersistAcrossScenes = true;
             go.AddComponent<NetworkTransform>();
             go.AddComponent<SamplePlayer>();
             var prefab = PrefabUtility.SaveAsPrefabAsset(go, Folder + "/SamplePlayer.prefab");

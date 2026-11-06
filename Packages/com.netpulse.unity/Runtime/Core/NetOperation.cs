@@ -33,10 +33,13 @@ namespace NetPulse
     {
         private NetError? _error;
         private Action<NetOperation> _completed;
+        private Action _cancelHandler;
 
         public bool IsDone { get; private set; }
 
-        public bool IsSuccess => IsDone && !_error.HasValue;
+        public bool IsCanceled { get; private set; }
+
+        public bool IsSuccess => IsDone && !_error.HasValue && !IsCanceled;
 
         public bool HasError => _error.HasValue;
 
@@ -75,6 +78,23 @@ namespace NetPulse
 
         public NetOperationAwaiter GetAwaiter() => new(this);
 
+        public void Cancel()
+        {
+            if (IsDone)
+            {
+                return;
+            }
+
+            IsCanceled = true;
+            IsDone = true;
+            var handler = _cancelHandler;
+            _cancelHandler = null;
+            handler?.Invoke();
+            Raise();
+        }
+
+        internal void SetCancelHandler(Action handler) => _cancelHandler = handler;
+
         internal virtual void Complete()
         {
             if (IsDone)
@@ -82,6 +102,7 @@ namespace NetPulse
                 return;
             }
 
+            _cancelHandler = null;
             IsDone = true;
             Raise();
         }
@@ -94,6 +115,7 @@ namespace NetPulse
             }
 
             _error = new NetError(code, message);
+            _cancelHandler = null;
             IsDone = true;
             Raise();
         }
@@ -170,6 +192,11 @@ namespace NetPulse
 
         public void GetResult()
         {
+            if (_operation.IsCanceled)
+            {
+                throw new OperationCanceledException();
+            }
+
             if (_operation.HasError)
             {
                 throw new NetPulseException(_operation.Error.ReturnCode, _operation.Error.Message);
@@ -194,6 +221,11 @@ namespace NetPulse
 
         public T GetResult()
         {
+            if (_operation.IsCanceled)
+            {
+                throw new OperationCanceledException();
+            }
+
             if (_operation.HasError)
             {
                 throw new NetPulseException(_operation.Error.ReturnCode, _operation.Error.Message);

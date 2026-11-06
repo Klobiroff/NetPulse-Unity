@@ -50,6 +50,10 @@ namespace NetPulse
 
         public event Action<NetworkObject, short, string> OnOwnershipFailed;
 
+        public event Action<string> OnNetworkSceneLoaded;
+
+        internal event Action<Player, Player> OnMasterChangedRaw;
+
         internal event Action<int, int, int> OnOwnershipChangedRaw;
 
         internal event Action<int, int> OnOwnershipRequestedRaw;
@@ -89,6 +93,10 @@ namespace NetPulse
         internal void RaisePlayerProperties(Player player, PropertyTable changed) => OnPlayerPropertiesChanged?.Invoke(player, changed);
 
         internal void RaiseMasterSwitched(Player master) => OnMasterClientSwitched?.Invoke(master);
+
+        internal void RaiseMasterChanged(Player previous, Player current) => OnMasterChangedRaw?.Invoke(previous, current);
+
+        internal void RaiseNetworkSceneLoaded(string scene) => OnNetworkSceneLoaded?.Invoke(scene);
 
         internal void RaiseEvent(byte code, int sender, object data) => OnEvent?.Invoke(code, sender, data);
 

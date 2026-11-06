@@ -37,6 +37,25 @@ namespace NetPulse
     [AttributeUsage(AttributeTargets.Method)]
     public sealed class NetRpcAttribute : PreserveAttribute
     {
+        public NetRpcAttribute(RpcTarget target = RpcTarget.All)
+        {
+            Target = target;
+        }
+
+        public RpcTarget Target { get; }
+
+        public DeliveryMode Delivery { get; set; } = DeliveryMode.ReliableOrdered;
+
+        public bool OwnerOnly { get; set; }
+    }
+
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Struct)]
+    public sealed class NetSerializableAttribute : PreserveAttribute
+    {
+    }
+
+    public interface INetMessage
+    {
     }
 
     [AttributeUsage(AttributeTargets.Field)]
@@ -73,5 +92,14 @@ namespace NetPulse
         public DeliveryMode Delivery { get; set; } = DeliveryMode.ReliableOrdered;
 
         public ObjectOwnershipMode OwnershipMode { get; set; }
+
+        public byte ObjectFlags { get; set; }
+    }
+
+    public sealed class MessageOptions
+    {
+        public DeliveryMode Delivery { get; set; } = DeliveryMode.ReliableOrdered;
+
+        public CachingOption Caching { get; set; } = CachingOption.DoNotCache;
     }
 }

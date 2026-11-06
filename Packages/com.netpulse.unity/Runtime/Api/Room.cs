@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using NetPulse.Common;
@@ -12,7 +13,7 @@ namespace NetPulse
 
         internal Room(NetPulseClient client, string name)
         {
-            _client = client ?? throw new System.ArgumentNullException(nameof(client));
+            _client = client ?? throw new ArgumentNullException(nameof(client));
             Name = name;
         }
 
@@ -49,6 +50,39 @@ namespace NetPulse
             var delta = new PropertyTable();
             delta[key] = value;
             SetProperties(delta);
+        }
+
+        public T Get<T>(RoomKey<T> key, T defaultValue = default) => _properties.Get((key ?? throw new ArgumentNullException(nameof(key))).Name, defaultValue);
+
+        public void Set<T>(RoomKey<T> key, T value) => SetProperty((key ?? throw new ArgumentNullException(nameof(key))).Name, value);
+
+        public NetOperation SetAsync<T>(RoomKey<T> key, T value, T expected)
+        {
+            var name = (key ?? throw new ArgumentNullException(nameof(key))).Name;
+            var delta = new PropertyTable();
+            delta[name] = value;
+            var guard = new PropertyTable();
+            guard[name] = expected;
+            return _client.SetRoomProperties(delta, guard);
+        }
+
+        public IDisposable OnChanged<T>(RoomKey<T> key, Action<T> handler)
+        {
+            var name = (key ?? throw new ArgumentNullException(nameof(key))).Name;
+            if (handler == null)
+            {
+                throw new ArgumentNullException(nameof(handler));
+            }
+
+            Action<PropertyTable> listener = changed =>
+            {
+                if (changed != null && changed.ContainsKey(name))
+                {
+                    handler(changed.Get<T>(name));
+                }
+            };
+            _client.Events.OnRoomPropertiesChanged += listener;
+            return new Unsubscriber(() => _client.Events.OnRoomPropertiesChanged -= listener);
         }
 
         public void SetProperties(PropertyTable delta, PropertyTable expected = null) => _client.SetRoomProperties(delta, expected);

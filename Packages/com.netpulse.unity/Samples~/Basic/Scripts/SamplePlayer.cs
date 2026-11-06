@@ -7,55 +7,64 @@ using UnityEngine.InputSystem;
 namespace NetPulse.Samples.Basic
 {
     [RequireComponent(typeof(NetworkObject))]
-    public sealed class SamplePlayer : NetworkBehaviour
+    public sealed partial class SamplePlayer : NetworkBehaviour
     {
         [SerializeField, Min(0f)] private float _speed = 5f;
 
-        [Synced] private Color _color = Color.white;
+        private readonly SyncVar<Color> _color = new(Color.white);
+        private readonly SyncVar<int> _health = new(100);
 
         private Renderer _renderer;
+        private Vector3 _move;
         private string _message = string.Empty;
         private float _messageUntil;
 
+        public int Health => _health.Value;
+
         public override void OnNetworkSpawned()
         {
-            if (NetworkObject.InstantiationData is Color color)
+            if (IsMine && NetworkObject.InstantiationData is Color color)
             {
-                _color = color;
+                _color.Value = color;
             }
 
-            Apply();
+            _color.Changed += (_, current) => Apply(current);
+            _health.Changed += (previous, current) => Debug.Log($"[Sample] {name} health {previous} -> {current}");
+            Apply(_color.Value);
+        }
+
+        public override void OnNetworkTick(long tick)
+        {
+            if (IsMine)
+            {
+                transform.position += _move * (_speed * (float)Pulse.TickDelta);
+            }
         }
 
         private void Awake() => _renderer = GetComponentInChildren<Renderer>();
 
         private void Update()
         {
-            if (!IsSpawned)
+            if (!IsSpawned || !IsMine)
             {
                 return;
             }
 
-            if (_renderer != null && _renderer.material.color != _color)
-            {
-                Apply();
-            }
-
-            if (!IsMine)
-            {
-                return;
-            }
-
-            transform.position += ReadMove() * (_speed * Time.deltaTime);
+            _move = ReadMove();
             if (ReadHello())
             {
-                CallRpc(nameof(Hello), RpcTarget.All, $"Hello from {Owner?.NickName}");
+                Rpc.Hello($"Hello from {Owner?.NickName}");
+            }
+
+            if (ReadHurt())
+            {
+                _health.Value = Mathf.Max(0, _health.Value - 10);
             }
         }
 
         private void OnGUI()
         {
-            if (Time.time > _messageUntil || Camera.main == null)
+            if (Camera.main == null)
             {
                 return;
             }
@@ -66,21 +75,22 @@ namespace NetPulse.Samples.Basic
                 return;
             }
 
-            GUI.Label(new Rect(screen.x - 80f, Screen.height - screen.y, 160f, 24f), _message);
+            var text = Time.time > _messageUntil ? $"HP {_health.Value}" : $"HP {_health.Value}: {_message}";
+            GUI.Label(new Rect(screen.x - 80f, Screen.height - screen.y, 200f, 24f), text);
         }
 
-        [NetRpc]
+        [NetRpc(RpcTarget.All)]
         private void Hello(string text, NetRpcInfo info)
         {
             _message = text;
             _messageUntil = Time.time + 2f;
         }
 
-        private void Apply()
+        private void Apply(Color color)
         {
             if (_renderer != null)
             {
-                _renderer.material.color = _color;
+                _renderer.material.color = color;
             }
         }
 
@@ -109,6 +119,17 @@ namespace NetPulse.Samples.Basic
             return Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame;
 #elif ENABLE_LEGACY_INPUT_MANAGER
             return Input.GetKeyDown(KeyCode.Space);
+#else
+            return false;
+#endif
+        }
+
+        private static bool ReadHurt()
+        {
+#if ENABLE_INPUT_SYSTEM
+            return Keyboard.current != null && Keyboard.current.hKey.wasPressedThisFrame;
+#elif ENABLE_LEGACY_INPUT_MANAGER
+            return Input.GetKeyDown(KeyCode.H);
 #else
             return false;
 #endif

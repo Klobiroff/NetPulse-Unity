@@ -3,7 +3,7 @@ using NUnit.Framework;
 
 namespace NetPulse.Tests.Editor
 {
-    public sealed class LinkXmlGeneratorTests
+    public sealed partial class LinkXmlGeneratorTests
     {
         private const string TestAssembly = "NetPulse.Tests.Editor";
 
@@ -19,6 +19,19 @@ namespace NetPulse.Tests.Editor
             Assert.IsTrue(HasAttribute(behaviour, "method", "signature", "System.Void Hit(System.Int32,NetPulse.NetRpcInfo)"));
             Assert.IsTrue(HasAttribute(behaviour, "method", "signature", "System.Void OnSerialize(NetPulse.NetStream)"));
             Assert.IsNotNull(FindType(document, "NetPulse.Tests.Editor.LinkXmlGeneratorTests/LinkTestSerializable"));
+        }
+
+        [Test]
+        public void Generate_PreservesNetSerializableTypesAndGeneratedRpcDispatch()
+        {
+            var xml = NetPulse.Editor.LinkXmlGenerator.Generate(name => name == TestAssembly, false);
+            var document = XDocument.Parse(xml);
+
+            var behaviour = FindType(document, "NetPulse.Tests.Editor.LinkXmlGeneratorTests/LinkTestBehaviour");
+            Assert.IsTrue(HasAttribute(behaviour, "method", "name", "InvokeGeneratedRpc"));
+            var netType = FindType(document, "NetPulse.Tests.Editor.LinkXmlGeneratorTests/LinkTestNetType");
+            Assert.IsNotNull(netType);
+            Assert.IsTrue(HasAttribute(netType, "method", "name", "NetWrite"));
         }
 
         [Test]
@@ -79,7 +92,7 @@ namespace NetPulse.Tests.Editor
             return false;
         }
 
-        public sealed class LinkTestBehaviour : NetworkBehaviour
+        public sealed partial class LinkTestBehaviour : NetworkBehaviour
         {
             [Synced] private int _hp;
 
@@ -93,6 +106,12 @@ namespace NetPulse.Tests.Editor
             {
                 _hp -= damage;
             }
+        }
+
+        [NetSerializable]
+        public partial struct LinkTestNetType
+        {
+            public int Value;
         }
 
         public sealed class LinkTestSerializable : INetSerializable

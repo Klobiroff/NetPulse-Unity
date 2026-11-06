@@ -12,6 +12,8 @@ namespace NetPulse
         private const double PingInterval = 2d;
         private const int OfflineActorId = 1;
         private const double ErrorLogInterval = 5d;
+        private const int DefaultTickRate = 30;
+        private const int MaxQueuedRoomEvents = 4096;
 
         private readonly INetTransport _transport;
         private readonly Func<double> _clock;
@@ -19,6 +21,8 @@ namespace NetPulse
         private readonly ServerClock _serverClock = new();
         private readonly NetWriter _writer = new(512);
         private readonly Dictionary<string, RoomInfo> _lobbyRooms = new();
+        private readonly OperationScheduler _scheduler = new();
+        private readonly Queue<QueuedRoomEvent> _queuedRoomEvents = new();
 
         private ConnectionOptions _options = new();
         private NetOperation _connectOperation;
@@ -27,6 +31,9 @@ namespace NetPulse
         private double _lastErrorTime;
         private string _lastErrorKey;
         private bool _offlineMode;
+        private int _eventGate;
+        private Player _masterPlayer;
+        private int _tickRate = DefaultTickRate;
 
         public NetPulseClient(INetTransport transport, Func<double> clock = null)
         {
@@ -35,9 +42,24 @@ namespace NetPulse
             _transport.Connected += OnTransportConnected;
             _transport.Disconnected += OnTransportDisconnected;
             _transport.DataReceived += OnDataReceived;
+            Messages = new MessageBus(this);
         }
 
         public NetPulseEvents Events { get; } = new();
+
+        public NetStats Stats { get; } = new();
+
+        public bool AutoSyncScene { get; set; } = true;
+
+        internal MessageBus Messages { get; }
+
+        internal bool IsDispatchSuspended => _eventGate > 0;
+
+        public int TickRate => _tickRate;
+
+        public double TickDelta => 1d / _tickRate;
+
+        public long CurrentTick => (long)Math.Floor(ServerTime * _tickRate);
 
         public NetState State { get; private set; } = NetState.Disconnected;
 
@@ -87,7 +109,7 @@ namespace NetPulse
             }
         }
 
-        private double Now => _clock();
+        internal double Now => _clock();
 
         public NetOperation Connect(ConnectionOptions options)
         {
@@ -140,12 +162,15 @@ namespace NetPulse
         {
             if (_offlineMode)
             {
+                _scheduler.Run();
                 return;
             }
 
             _transport.Poll();
             var now = Now;
+            Stats.Update(now);
             _tracker.Tick(now);
+            _scheduler.Run();
             if (IsConnected && now - _lastPing >= PingInterval)
             {
                 _lastPing = now;
@@ -317,6 +342,12 @@ namespace NetPulse
                 return NetOperation.Failed(NetPulseReturnCode.InvalidState, "Not in a room");
             }
 
+            if (properties != null && properties.ContainsKey(RoomPropertyKeys.Scene) && _room.MasterClientId != LocalActorId)
+            {
+                Debug.LogWarning("[NetPulse] The room property '_scene' is reserved: only the master client may change it (use Pulse.LoadScene).");
+                return NetOperation.Failed(ReturnCode.Forbidden, "Only the master client may change the scene");
+            }
+
             var room = _room;
             var request = new SetPropertiesRequest { ActorId = 0, Properties = properties, ExpectedProperties = expected };
             return SetProperties(OpCode.SetRoomProperties, request, expected != null, () => ApplyRoomProperties(room, properties));
@@ -407,12 +438,14 @@ namespace NetPulse
         {
             if (!IsInRoom)
             {
+                Stats.DiscardTags();
                 return;
             }
 
             options ??= new RaiseEventOptions();
             if (_offlineMode)
             {
+                Stats.DiscardTags();
                 if (IsLocalReceiver(options))
                 {
                     DispatchRoomEvent(eventCode, LocalActorId, data, viewId);
@@ -431,6 +464,7 @@ namespace NetPulse
                 Caching = options.Caching,
                 Delivery = options.Delivery,
                 OwnershipMode = options.OwnershipMode,
+                ObjectFlags = options.ObjectFlags,
                 ViewId = viewId
             };
             Send(OpCode.RaiseEvent, request.ToParameters(), null, options.Delivery);
@@ -517,6 +551,8 @@ namespace NetPulse
 
             room.LocalPlayer = room.GetPlayer(response.LocalActorId);
             _serverClock.SetInitial(response.ServerTimeTicks, Now * 1000d);
+            _tickRate = response.TickRate > 0 ? response.TickRate : DefaultTickRate;
+            _masterPlayer = room.GetPlayer(response.MasterClientId);
             return room;
         }
 
@@ -537,6 +573,8 @@ namespace NetPulse
             var local = new Player(this, OfflineActorId, NickName, UserId, true);
             room.AddPlayer(local);
             room.LocalPlayer = local;
+            _tickRate = DefaultTickRate;
+            _masterPlayer = local;
             return room;
         }
 
@@ -651,6 +689,8 @@ namespace NetPulse
             }
 
             _room = null;
+            _masterPlayer = null;
+            ClearQueuedRoomEvents();
             if (State == NetState.Leaving || State == NetState.InRoom)
             {
                 SetState(NetState.Connected);
@@ -669,6 +709,8 @@ namespace NetPulse
             _tracker.FailAll(NetPulseReturnCode.Disconnected, reason);
             var hadRoom = _room != null;
             _room = null;
+            _masterPlayer = null;
+            ClearQueuedRoomEvents();
             _lobbyRooms.Clear();
             var connect = _connectOperation;
             _connectOperation = null;
@@ -745,18 +787,24 @@ namespace NetPulse
         {
             BytesReceived += data.Count;
             MessagesReceived++;
+            Stats.BeginIn(data.Count);
             try
             {
                 var reader = new NetReader(data);
                 switch (Protocol.ReadKind(reader))
                 {
                     case MessageKind.OperationResponse:
-                        _tracker.TryComplete(Protocol.ReadOperationResponse(reader));
+                        var response = Protocol.ReadOperationResponse(reader);
+                        Stats.LabelIn(NetStats.Label((byte)MessageKind.OperationResponse, response.OpCode));
+                        _tracker.TryComplete(response);
                         break;
                     case MessageKind.Event:
-                        HandleEvent(Protocol.ReadEvent(reader));
+                        var eventData = Protocol.ReadEvent(reader);
+                        Stats.LabelIn(NetStats.Label((byte)MessageKind.Event, eventData.Code));
+                        HandleEvent(eventData);
                         break;
                     case MessageKind.Pong:
+                        Stats.LabelIn(NetStats.Label((byte)MessageKind.Pong, 0));
                         Protocol.ReadPingPong(reader, out var clientTicks, out var serverTicks);
                         _serverClock.AddSample(clientTicks, serverTicks, Now * 1000d);
                         break;
@@ -766,6 +814,8 @@ namespace NetPulse
             {
                 Debug.LogException(e);
             }
+
+            Stats.EndIn();
         }
 
         private void HandleEvent(EventData data)
@@ -803,7 +853,7 @@ namespace NetPulse
                     Events.RaiseOwnershipRequested(requested.ViewId, requested.RequesterActorId);
                     break;
                 default:
-                    if (data.Code <= EventCode.MaxUserEvent || (data.Code >= EventCode.ObjectInstantiate && data.Code <= EventCode.StateSync))
+                    if (data.Code <= EventCode.MaxUserEvent || (data.Code >= EventCode.ObjectInstantiate && data.Code <= EventCode.SyncVarSet))
                     {
                         var roomEvent = RoomEventData.FromParameters(parameters);
                         DispatchRoomEvent(data.Code, roomEvent.SenderActorId, roomEvent.Data, roomEvent.ViewId);
@@ -827,13 +877,158 @@ namespace NetPulse
             Debug.LogWarning($"[NetPulse] Server rejected a message ({error.ErrorCode}): {error.Message}");
         }
 
+        internal void SuspendRoomEvents() => _eventGate++;
+
+        internal void ResumeRoomEvents()
+        {
+            if (_eventGate > 0)
+            {
+                _eventGate--;
+            }
+
+            while (_eventGate == 0 && _queuedRoomEvents.Count > 0)
+            {
+                var queued = _queuedRoomEvents.Dequeue();
+                try
+                {
+                    Stats.ReplayIn(queued.Bytes);
+                    DispatchRoomEvent(queued.Code, queued.Sender, queued.Data, queued.ViewId);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogException(e);
+                }
+            }
+        }
+
+        internal void ClearQueuedRoomEvents()
+        {
+            _queuedRoomEvents.Clear();
+            _eventGate = 0;
+        }
+
+        internal int QueuedRoomEventCount => _queuedRoomEvents.Count;
+
+        public NetOperation WaitUntil(Func<bool> condition)
+        {
+            if (condition == null)
+            {
+                throw new ArgumentNullException(nameof(condition));
+            }
+
+            var operation = new NetOperation();
+            if (!EvaluateWait(operation, condition))
+            {
+                _scheduler.Add(() => operation.IsDone || EvaluateWait(operation, condition));
+            }
+
+            return operation;
+        }
+
+        public NetOperation WaitForPlayers(int count)
+        {
+            if (!IsInRoom)
+            {
+                return NetOperation.Failed(NetPulseReturnCode.InvalidState, "Not in a room");
+            }
+
+            var room = _room;
+            var operation = new NetOperation();
+            if (room.PlayerCount >= count)
+            {
+                operation.Complete();
+                return operation;
+            }
+
+            _scheduler.Add(() =>
+            {
+                if (operation.IsDone)
+                {
+                    return true;
+                }
+
+                if (_room != room)
+                {
+                    operation.Fail(NetPulseReturnCode.InvalidState, "Left the room while waiting for players");
+                    return true;
+                }
+
+                if (room.PlayerCount < count)
+                {
+                    return false;
+                }
+
+                operation.Complete();
+                return true;
+            });
+            return operation;
+        }
+
+        internal void Schedule(Func<bool> step) => _scheduler.Add(step);
+
+        private static bool EvaluateWait(NetOperation operation, Func<bool> condition)
+        {
+            try
+            {
+                if (!condition())
+                {
+                    return false;
+                }
+
+                operation.Complete();
+            }
+            catch (Exception e)
+            {
+                operation.Fail(NetPulseReturnCode.InvalidState, e.Message);
+            }
+
+            return true;
+        }
+
         private void DispatchRoomEvent(byte code, int sender, object data, int viewId)
         {
+            if (_eventGate > 0)
+            {
+                if (_queuedRoomEvents.Count < MaxQueuedRoomEvents)
+                {
+                    Stats.ClaimIn();
+                    _queuedRoomEvents.Enqueue(new QueuedRoomEvent(code, sender, data, viewId, Stats.PacketBytes));
+                }
+                else
+                {
+                    Debug.LogWarning("[NetPulse] Too many room events queued while a scene was loading; dropping the newest events.");
+                }
+
+                return;
+            }
+
             Events.RaiseRoomEvent(code, sender, data, viewId);
             if (code <= EventCode.MaxUserEvent)
             {
                 Events.RaiseEvent(code, sender, data);
             }
+        }
+
+        private readonly struct QueuedRoomEvent
+        {
+            public QueuedRoomEvent(byte code, int sender, object data, int viewId, int bytes)
+            {
+                Code = code;
+                Sender = sender;
+                Data = data;
+                ViewId = viewId;
+                Bytes = bytes;
+            }
+
+            public byte Code { get; }
+
+            public int Sender { get; }
+
+            public object Data { get; }
+
+            public int ViewId { get; }
+
+            public int Bytes { get; }
         }
 
         private void HandleRoomList(RoomListData data)
@@ -920,14 +1115,18 @@ namespace NetPulse
                 return;
             }
 
+            var previous = _masterPlayer ?? _room.GetPlayer(_room.MasterClientId);
             _room.MasterClientId = masterId;
-            Events.RaiseMasterSwitched(_room.MasterClient);
+            _masterPlayer = _room.MasterClient;
+            Events.RaiseMasterChanged(previous, _masterPlayer);
+            Events.RaiseMasterSwitched(_masterPlayer);
         }
 
         private void Send(byte opCode, ParameterDictionary parameters, Action<OperationResponse> onResponse, DeliveryMode delivery = DeliveryMode.ReliableOrdered)
         {
             if (!_transport.IsConnected)
             {
+                Stats.DiscardTags();
                 onResponse?.Invoke(new OperationResponse
                 {
                     OpCode = opCode,
@@ -947,6 +1146,7 @@ namespace NetPulse
             var segment = Protocol.Serialize(_writer, new OperationRequest { OpCode = opCode, RequestId = requestId, Parameters = parameters });
             _transport.Send(segment, delivery);
             BytesSent += segment.Count;
+            Stats.CommitOut(segment.Count, NetStats.Label((byte)MessageKind.OperationRequest, opCode));
             MessagesSent++;
         }
 
@@ -955,6 +1155,7 @@ namespace NetPulse
             var segment = Protocol.SerializePingPong(_writer, MessageKind.Ping, (long)(now * 1000d), 0L);
             _transport.Send(segment, DeliveryMode.Unreliable);
             BytesSent += segment.Count;
+            Stats.CommitOut(segment.Count, NetStats.Label((byte)MessageKind.Ping, 0));
             MessagesSent++;
         }
     }

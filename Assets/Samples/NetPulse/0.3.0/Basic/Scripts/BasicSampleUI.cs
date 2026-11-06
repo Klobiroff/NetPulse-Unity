@@ -1,3 +1,5 @@
+using System;
+using Random = UnityEngine.Random;
 using System.Collections.Generic;
 using NetPulse;
 using NetPulse.Common;
@@ -7,6 +9,8 @@ namespace NetPulse.Samples.Basic
 {
     public sealed class BasicSampleUI : NetPulseCallbacks
     {
+        private static readonly RoomKey<int> Score = new("score");
+
         [SerializeField] private GameObject _playerPrefab = null;
         [SerializeField] private string _roomName = "demo";
         [SerializeField, Range(2, 16)] private int _maxPlayers = 4;
@@ -20,6 +24,26 @@ namespace NetPulse.Samples.Basic
         private GameObject _localPlayer;
         private Vector2 _roomScroll;
         private Vector2 _logScroll;
+        private string _chatText = "hello";
+        private IDisposable _chatSubscription;
+        private IDisposable _scoreSubscription;
+
+        private void Awake() => DontDestroyOnLoad(gameObject);
+
+        protected override void OnEnable()
+        {
+            base.OnEnable();
+            _chatSubscription = Pulse.On<ChatMessage>((message, sender) => Log($"{sender?.NickName}: {message.Text}"));
+        }
+
+        protected override void OnDisable()
+        {
+            base.OnDisable();
+            _chatSubscription?.Dispose();
+            _scoreSubscription?.Dispose();
+        }
+
+        public override void OnNetworkSceneLoaded(string sceneName) => Log($"Network scene loaded: {sceneName}");
 
         public override void OnConnected() => Log("Connected as " + Pulse.UserId);
 
@@ -32,6 +56,8 @@ namespace NetPulse.Samples.Basic
         public override void OnJoinedRoom()
         {
             Log($"Joined '{Pulse.CurrentRoom.Name}' as actor {Pulse.LocalActorId}");
+            _scoreSubscription?.Dispose();
+            _scoreSubscription = Pulse.CurrentRoom.OnChanged(Score, value => Log($"Room score is now {value}"));
             SpawnPlayer();
         }
 
@@ -156,33 +182,52 @@ namespace NetPulse.Samples.Basic
         private void DrawRoom()
         {
             var room = Pulse.CurrentRoom;
-            GUILayout.Label($"Room '{room.Name}'  players {room.PlayerCount}/{room.MaxPlayers}  server time {Pulse.ServerTime:F1}");
-            GUILayout.Label("Move: WASD    RPC: Space (says hello over every client)");
+            GUILayout.Label($"Room '{room.Name}'  players {room.PlayerCount}/{room.MaxPlayers}  tick {Pulse.Tick} @ {Pulse.TickRate} Hz");
+            GUILayout.Label("Move: WASD    RPC: Space    Hurt yourself: H (SyncVar health)");
             foreach (var player in room.Players)
             {
                 var master = player.IsMasterClient ? " [master]" : string.Empty;
                 var mine = player.IsLocal ? " (you)" : string.Empty;
-                GUILayout.Label($"#{player.ActorId} {player.NickName}{master}{mine}  score={player.GetProperty<int>("score")}");
+                GUILayout.Label($"#{player.ActorId} {player.NickName}{master}{mine}");
             }
 
+            GUILayout.Label($"Room score (typed RoomKey<int>): {room.Get(Score)}");
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Score +1"))
             {
-                var local = Pulse.LocalPlayer;
-                local.SetProperty("score", local.GetProperty<int>("score") + 1);
+                room.Set(Score, room.Get(Score) + 1);
             }
 
-            if (GUILayout.Button("Room color"))
+            if (GUILayout.Button("Score +1 (CAS)"))
             {
-                room.SetProperty("color", Random.ColorHSV());
-            }
-
-            if (GUILayout.Button("Event 1"))
-            {
-                Pulse.RaiseEvent(1, "ping", new RaiseEventOptions { Receivers = ReceiverGroup.All });
+                room.SetAsync(Score, room.Get(Score) + 1, room.Get(Score));
             }
 
             GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            _chatText = GUILayout.TextField(_chatText);
+            if (GUILayout.Button("Send", GUILayout.Width(60f)))
+            {
+                Pulse.Send(new ChatMessage { Text = _chatText, Number = room.Get(Score) }, RpcTarget.All);
+            }
+
+            GUILayout.EndHorizontal();
+            if (Pulse.IsMasterClient)
+            {
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("Load Arena (master)"))
+                {
+                    Pulse.LoadScene("BasicSampleArena");
+                }
+
+                if (GUILayout.Button("Load Main (master)"))
+                {
+                    Pulse.LoadScene("BasicSample");
+                }
+
+                GUILayout.EndHorizontal();
+            }
+
             if (GUILayout.Button("Leave room"))
             {
                 Pulse.LeaveRoom();

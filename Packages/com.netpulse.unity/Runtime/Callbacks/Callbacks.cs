@@ -57,13 +57,18 @@ namespace NetPulse
         void OnOwnershipFailed(NetworkObject networkObject, short returnCode, string message);
     }
 
+    public interface ISceneCallbacks
+    {
+        void OnNetworkSceneLoaded(string sceneName);
+    }
+
     public interface IOnEventCallback
     {
         void OnEvent(byte eventCode, int senderActorId, object data);
     }
 
     public abstract class NetPulseCallbacks : MonoBehaviour,
-        INetPulseConnectionCallbacks, ILobbyCallbacks, IMatchmakingCallbacks, IRoomCallbacks, IOwnershipCallbacks, IOnEventCallback
+        INetPulseConnectionCallbacks, ILobbyCallbacks, IMatchmakingCallbacks, IRoomCallbacks, IOwnershipCallbacks, ISceneCallbacks, IOnEventCallback
     {
         protected virtual void OnEnable() => Pulse.AddCallbackTarget(this);
 
@@ -142,6 +147,10 @@ namespace NetPulse
         }
 
         public virtual void OnOwnershipFailed(NetworkObject networkObject, short returnCode, string message)
+        {
+        }
+
+        public virtual void OnNetworkSceneLoaded(string sceneName)
         {
         }
 

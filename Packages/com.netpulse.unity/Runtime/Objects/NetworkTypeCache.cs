@@ -12,6 +12,12 @@ namespace NetPulse
         {
             Id = id;
             Method = method;
+            var attribute = (NetRpcAttribute)Attribute.GetCustomAttribute(method, typeof(NetRpcAttribute), true);
+            DefaultTarget = attribute?.Target ?? RpcTarget.All;
+            Delivery = attribute?.Delivery ?? DeliveryMode.ReliableOrdered;
+            OwnerOnly = attribute != null && attribute.OwnerOnly;
+            GeneratedId = NetworkTypeInfo.ComputeRpcId(method.Name);
+            StatName = $"{method.DeclaringType?.Name}.{method.Name}";
             var parameters = method.GetParameters();
             var count = parameters.Length;
             AcceptsInfo = count > 0 && parameters[count - 1].ParameterType == typeof(NetRpcInfo);
@@ -24,6 +30,16 @@ namespace NetPulse
         }
 
         public int Id { get; }
+
+        public ushort GeneratedId { get; }
+
+        public RpcTarget DefaultTarget { get; }
+
+        public DeliveryMode Delivery { get; }
+
+        public bool OwnerOnly { get; }
+
+        public string StatName { get; }
 
         public MethodInfo Method { get; }
 
@@ -40,6 +56,7 @@ namespace NetPulse
 
         private readonly Dictionary<int, RpcMethodInfo> _rpcById = new();
         private readonly Dictionary<string, RpcMethodInfo> _rpcByName = new();
+        private readonly Dictionary<ushort, RpcMethodInfo> _rpcByGeneratedId = new();
 
         private NetworkTypeInfo(Type type)
         {
@@ -56,6 +73,7 @@ namespace NetPulse
                     var rpc = new RpcMethodInfo(StableHash(method.Name), method);
                     _rpcByName[method.Name] = rpc;
                     _rpcById[rpc.Id] = rpc;
+                    _rpcByGeneratedId[rpc.GeneratedId] = rpc;
                 }
             }
 
@@ -78,10 +96,13 @@ namespace NetPulse
                 synced.RemoveRange(32, synced.Count - 32);
             }
 
+            TypeName = type.Name;
             SyncedFields = synced.ToArray();
             var serialize = type.GetMethod(nameof(NetworkBehaviour.OnSerialize), BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             OverridesSerialize = serialize != null && serialize.DeclaringType != typeof(NetworkBehaviour);
         }
+
+        public string TypeName { get; }
 
         public FieldInfo[] SyncedFields { get; }
 
@@ -103,6 +124,22 @@ namespace NetPulse
         public bool TryGetRpc(int id, out RpcMethodInfo rpc) => _rpcById.TryGetValue(id, out rpc);
 
         public bool TryGetRpc(string name, out RpcMethodInfo rpc) => _rpcByName.TryGetValue(name, out rpc);
+
+        public bool TryGetGeneratedRpc(ushort id, out RpcMethodInfo rpc) => _rpcByGeneratedId.TryGetValue(id, out rpc);
+
+        public static ushort ComputeRpcId(string name)
+        {
+            unchecked
+            {
+                var hash = 2166136261u;
+                foreach (var b in System.Text.Encoding.UTF8.GetBytes(name))
+                {
+                    hash = (hash ^ b) * 16777619u;
+                }
+
+                return (ushort)(hash ^ (hash >> 16));
+            }
+        }
 
         public static int StableHash(string text)
         {

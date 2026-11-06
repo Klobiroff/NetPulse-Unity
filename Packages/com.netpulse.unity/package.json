@@ -1,6 +1,6 @@
 {
   "name": "com.netpulse.unity",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "displayName": "NetPulse",
   "description": "NetPulse client for Unity: a Photon-like networking solution with a simple async API, rooms, lobby, RPCs, synced objects and server plugins.",
   "unity": "2021.3",
@@ -8,6 +8,6 @@
   "keywords": ["networking", "multiplayer", "netpulse", "rpc", "photon"],
   "author": { "name": "NetPulse" },
   "samples": [
-    { "displayName": "Basic", "description": "Connect, lobby list, create/join room, spawn a player with NetworkTransform, RPC, a shared takeover cube and properties UI (IMGUI).", "path": "Samples~/Basic" }
+    { "displayName": "Basic", "description": "Connect, lobby list, create/join room, generated RPCs, SyncVar health, a typed chat message, a typed RoomKey score, tick-based movement, master-only scene loading, a shared takeover cube (IMGUI).", "path": "Samples~/Basic" }
   ]
 }

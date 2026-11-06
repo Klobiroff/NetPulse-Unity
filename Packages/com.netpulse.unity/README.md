@@ -41,6 +41,160 @@ Pulse.JoinRoom("arena").Completed += op => Debug.Log(op.IsSuccess ? "ok" : op.Er
 yield return Pulse.Connect();            // inside a coroutine
 ```
 
+## The 0.3 API
+
+Everyday code needs no strings, byte codes or type registration. A Roslyn source generator (`Runtime/Analyzers/NetPulse.Generators.dll`,
+active for `NetPulse.Runtime` and every assembly that references it) writes the serialization and dispatch code at compile time,
+so nothing is found by reflection at runtime. Classes that declare `[NetRpc]`, `SyncVar<T>`, `[NetSerializable]` or `INetMessage` must be `partial`.
+`sealed partial` works too: there the generated `Rpc` property is private.
+
+### RPCs
+
+```csharp
+public partial class Hero : NetworkBehaviour
+{
+    [NetRpc(RpcTarget.Others)]
+    private void Hit(int damage, Vector3 at, NetRpcInfo info) => Debug.Log($"{info.Sender.NickName} hit for {damage}");
+
+    [NetRpc(RpcTarget.MasterClient, Delivery = DeliveryMode.Unreliable, OwnerOnly = true)]
+    private void Report(string text) { }
+
+    private void Update()
+    {
+        Rpc.Hit(10, transform.position);                    // target from the attribute
+        Rpc.To(RpcTarget.All).Hit(10, transform.position);  // explicit target
+        Rpc.To(somePlayer).Report("hi");                    // one player
+    }
+}
+```
+
+Supported parameter types: `bool, byte, sbyte, short, ushort, int, uint, long, ulong, float, double, char, string, Guid`, enums, Unity vectors/`Quaternion`/colors/`Rect`,
+`Player`, `NetworkObject`, `[NetSerializable]`/`INetMessage` types and `T[]` / `List<T>` of those. A trailing `NetRpcInfo` parameter receives the sender.
+RPC overloads are not allowed. `OwnerOnly` RPCs called by a non-owner log a warning and are not sent.
+
+### SyncVar
+
+```csharp
+public partial class Hero : NetworkBehaviour
+{
+    private readonly SyncVar<int> _health = new(100);                               // only the owner writes
+    private readonly SyncVar<string> _title = new("", SyncPermission.Master);       // only the master writes
+
+    public override void OnNetworkSpawned() => _health.Changed += (previous, current) => Debug.Log($"{previous} -> {current}");
+}
+```
+
+`Owner` variables travel as a delta inside the object's state sync; `Master` variables use their own event. Late joiners receive full values.
+A write without permission is ignored and logged once per field. `SyncVar<T>` converts implicitly to `T`.
+
+### Typed messages and serializable types
+
+```csharp
+public partial struct ChatMessage : INetMessage { public string Text; public int Channel; }
+
+using var subscription = Pulse.On<ChatMessage>((message, sender) => Debug.Log($"{sender.NickName}: {message.Text}"));
+Pulse.Send(new ChatMessage { Text = "hi" });                                // RpcTarget.Others by default
+Pulse.Send(new ChatMessage { Text = "all" }, RpcTarget.All);
+Pulse.Send(new ChatMessage { Text = "psst" }, somePlayer);
+Pulse.Send(new ChatMessage { Text = "once" }, RpcTarget.OthersBuffered, new MessageOptions { Delivery = DeliveryMode.ReliableOrdered });
+
+[NetSerializable] public partial struct Stats { public int Hp; public bool Alive; }   // usable in RPCs, messages and properties
+```
+
+Public fields and public get/set auto-properties are serialized in declaration order. A `[NetSerializable]` class writes a leading null flag and needs a parameterless constructor.
+Null and empty collections look the same on the wire.
+
+### Typed room and player keys
+
+```csharp
+static readonly RoomKey<int> Score = new("score");
+static readonly PlayerKey<string> Mood = new("mood");
+
+room.Set(Score, 5);
+var score = room.Get(Score);
+await room.SetAsync(Score, 6, expected: 5);                                   // compare-and-set; fails with PropertyCasFailed
+using var watch = room.OnChanged(Score, value => Debug.Log(value));
+player.Set(Mood, "happy");  player.OnChanged(Mood, (p, value) => { });
+```
+
+### Network tick
+
+`Pulse.TickRate` (from the server), `Pulse.Tick` (`floor(ServerTime * TickRate)`) and `Pulse.TickDelta`. `NetworkBehaviour.OnNetworkTick(long tick)` runs at that rate with
+a catch-up loop of at most 5 ticks per frame. `NetPulseSettings.SerializationRate = 0` follows the tick rate, and state is sent on tick boundaries.
+
+### Lifecycle and order guarantees
+
+1. `Awake` / `OnEnable` run first. The object is registered and its `SyncVar`s are collected in `NetworkObject.Awake`.
+2. `OnNetworkSpawned` is called exactly once. For objects owned by another player it waits until the initial state (`SyncVar`, `[Synced]`, `OnSerialize`) has been applied, or one second at most, so the first thing you see is real data.
+   It always runs before the first `OnNetworkTick` of that object.
+3. Ownership change: for each behaviour `OnOwnerChanged(previous, current)`, then `OnOwnershipGained()` or `OnOwnershipLost()`, then `NetworkObject.OwnershipChanged` and `Events.OnOwnershipChanged`.
+4. Master switch: `OnMasterChanged(previous, current)` on every spawned behaviour (scene objects without an explicit owner also get Gained/Lost), then `Events.OnMasterClientSwitched`.
+5. `OnNetworkDespawned` runs before `OnDestroy`, only if `OnNetworkSpawned` ran.
+
+### Async helpers
+
+```csharp
+bool ok = await networkObject.RequestOwnershipAsync(timeoutSeconds: 5);   // false on Forbidden, timeout or Fixed mode
+bool moved = await networkObject.TransferOwnershipAsync(player);
+await Pulse.WaitForPlayersAsync(2);
+await Pulse.WaitUntilAsync(() => ready);                                  // checked once per frame
+var op = Pulse.WaitForPlayersAsync(4); op.Cancel();                       // awaiting a cancelled operation throws OperationCanceledException
+```
+
+### Network scenes
+
+```csharp
+Pulse.LoadScene("Arena");           // master only (others get a warning)
+Pulse.Events.OnNetworkSceneLoaded += scene => Debug.Log(scene);
+```
+
+The master sets the room property `_scene` (`"{loadId}:{nameOrIndex}"`). With `NetPulseSettings.AutoSyncScene` (default on) every client, including late joiners, loads it asynchronously.
+Room events that arrive during the load are queued and replayed in order afterwards. Non-persistent network objects are destroyed locally; tick `Persist Across Scenes` on a root `NetworkObject` to keep it.
+Scene objects register after the load and the master re-registers them. `OnNetworkSceneLoaded` is not raised for a late joiner whose active scene already matches.
+Add the scenes to Build Settings. With `AutoSyncScene` off, `LoadScene` only sets the property and nobody loads automatically.
+
+### Traffic profiler
+
+`Pulse.Stats` counts bytes and messages in and out per category (`NetworkObject` per object, `Rpc` as `Type.Method`, `Message` per type, `StateSync`, `SyncVar` for Master variables, `System`),
+with bytes/s over a 1 second window and session totals. Categories overlap on purpose (an RPC counts under `Rpc` and under its `NetworkObject`).
+`NetPulseSettings.CollectStats` defaults to on in the editor and development builds; when off, the counters cost nothing. See the Traffic tab of **NetPulse -> Open Hub** (sort, filter, Reset).
+
+### Analyzers
+
+| Id | Severity | Rule |
+|---|---|---|
+| NP0001 | Error | Class with `[NetRpc]`, `SyncVar<T>` or `[NetSerializable]` is not `partial` |
+| NP0002 | Error | `[NetRpc]` outside a `NetworkBehaviour` |
+| NP0003 | Error | Unsupported RPC parameter type |
+| NP0004 | Error | RPC returns a value or has `ref`/`out`/`in` parameters |
+| NP0005 | Error | RPC overload |
+| NP0006 | Error | Unsupported field type in `[NetSerializable]` / `INetMessage` |
+| NP0007 | Error | `SyncVar<T>` with unsupported `T` |
+| NP0008 | Warning | `SyncVar<T>` field is not `readonly` or is outside a `NetworkBehaviour` |
+| NP0009 | Error | Id collision (RPCs in a type, messages / extended types in an assembly) |
+| NP0010 | Error | `[Synced]` on an unsupported field type |
+| NP0011 | Warning | `CallRpc("Name", ...)` while a `[NetRpc]` method with that name exists; use `Rpc.Name(...)` |
+
+## Low-level API
+
+Still supported and unchanged: reflection RPCs `CallRpc(nameof(Hit), RpcTarget.All, 10)` on `[NetRpc]` methods, `[Synced]` fields (primitives, strings, enums, Unity vectors/colors),
+`OnSerialize(NetStream)`, string property keys (`room.SetProperty("map", "forest")`, `SetProperties(delta, expected)`), and byte-coded events:
+`Pulse.RaiseEvent(code 0-199, data, new RaiseEventOptions { Receivers, TargetActors, Caching, InterestGroup, Delivery })`.
+
+```csharp
+public partial class Health : NetworkBehaviour
+{
+    [Synced] private int _hp = 100;
+
+    public void Damage(int amount) => CallRpc(nameof(TakeDamage), RpcTarget.All, amount);
+
+    [NetRpc]
+    private void TakeDamage(int amount, NetRpcInfo info) => _hp -= amount;
+}
+```
+
+The analyzer suggests `Rpc.TakeDamage(amount)` for that `CallRpc` (NP0011, a warning).
+
 ## Callbacks
 
 Either C# events:
@@ -64,8 +218,6 @@ and call `Pulse.AddCallbackTarget(this)` / `RemoveCallbackTarget(this)`.
 | Properties | `room.SetProperty(key, value)`, `player.SetProperty(...)`, `SetProperties(delta, expected)` (compare-and-set), `null` removes a key |
 | Events | `Pulse.RaiseEvent(code 0-199, data, new RaiseEventOptions { Receivers, TargetActors, Caching, InterestGroup, Delivery })` |
 | Objects | `Pulse.Instantiate(prefab, pos, rot, data)`, `Pulse.Destroy`, `NetworkObject`, `NetworkBehaviour`, `NetworkPrefabRegistry` |
-| RPC | `[NetRpc] void Hit(int dmg)` + `CallRpc(nameof(Hit), RpcTarget.All, 10)`; add `NetRpcInfo` as the last parameter to get the sender |
-| State sync | `[Synced]` fields (primitives, strings, enums, Unity vectors/colors) and/or `OnSerialize(NetStream)`; only changed data is sent |
 | Ownership | `OwnershipMode.Fixed / Takeover / Request`, `IsMine`, `Owner`, `RequestOwnership()`, `TransferOwnership(player)`, `ApproveOwnership(player)`, `OwnershipChanged`, `Events.OnOwnershipRequest`, `Events.OnOwnershipFailed` |
 | Authentication | `Pulse.AuthToken = "..."` (or `ConnectionOptions.AuthToken`) before `Connect()` |
 | Components | `NetworkTransform` (interpolation on server time), `NetworkRigidbody`, `NetworkAnimator` |
@@ -79,14 +231,14 @@ and call `Pulse.AddCallbackTarget(this)` / `RemoveCallbackTarget(this)`.
 3. Scene objects: tick *Scene Object* on the `NetworkObject`; they belong to the master client and are synchronised by view id.
 
 ```csharp
-public class Health : NetworkBehaviour
+public partial class Health : NetworkBehaviour
 {
-    [Synced] private int _hp = 100;
+    private readonly SyncVar<int> _hp = new(100);
 
-    public void Damage(int amount) => CallRpc(nameof(TakeDamage), RpcTarget.All, amount);
+    public void Damage(int amount) => Rpc.TakeDamage(amount);
 
     [NetRpc]
-    private void TakeDamage(int amount, NetRpcInfo info) => _hp -= amount;
+    private void TakeDamage(int amount, NetRpcInfo info) => _hp.Value -= amount;
 }
 ```
 
@@ -196,17 +348,17 @@ so they can be used in events, RPC arguments, room/player properties and `OnSeri
 ## Editor tools
 
 * **Project Settings -> NetPulse** - connection and rate settings, prefab registry.
-* **NetPulse -> Open Hub** - live connection status, room, players, ping and traffic in Play Mode.
+* **NetPulse -> Open Hub** - live connection status, room, players, ping in Play Mode, plus the Traffic tab (profiler table with sorting, filter and Reset).
 * **NetworkObject inspector** - ownership mode, scene object id, runtime view id and owner.
 
 ## Tests
 
-Tests live in `Tests/Runtime` (serialization, `NetPulseClient` on a fake transport, `NetOperation`, ownership) and `Tests/Editor`.
+Tests live in `Tests/Runtime` (serialization, `NetPulseClient` on a fake transport, messages, typed keys, tick, async helpers, network scenes, stats, SyncVar, generated RPCs, hooks, ownership) and `Tests/Editor`.
 `NetworkObjectOwnershipTests` create GameObjects and use `[UnityTest]`, so run them from the Test Runner in Play Mode.
 Enable them by adding the package to `testables` in `Packages/manifest.json` (the package is embedded, so it is already testable).
 
 ## Known limitations
 
-* `SendRate` caps the state-sync tick together with `SerializationRate` (the effective rate is the lower of the two).
+* `SendRate` caps the state-sync rate together with `SerializationRate` (the effective rate is the lower of the two; `SerializationRate = 0` means the server tick rate).
 * Buffered RPCs of destroyed objects stay in the room cache until their sender leaves.
 * Ownership is validated by the server; a client built for an older server (before ownership enforcement) must be updated, otherwise its objects stay `Fixed` and cannot change owner.

@@ -5,7 +5,7 @@ namespace NetPulse
 {
     [AddComponentMenu("NetPulse/Network Animator")]
     [DisallowMultipleComponent]
-    public sealed class NetworkAnimator : NetworkBehaviour
+    public sealed partial class NetworkAnimator : NetworkBehaviour
     {
         [SerializeField] private Animator _animator;
         [SerializeField] private bool _syncLayerWeights = false;
@@ -25,7 +25,7 @@ namespace NetPulse
             _animator.SetTrigger(hash);
             if (IsSpawned && Pulse.IsInRoom)
             {
-                CallRpc(nameof(RpcSetTrigger), RpcTarget.Others, hash);
+                Rpc.RpcSetTrigger(hash);
             }
         }
 
@@ -59,7 +59,7 @@ namespace NetPulse
             }
         }
 
-        [NetRpc]
+        [NetRpc(RpcTarget.Others)]
         private void RpcSetTrigger(int hash)
         {
             if (_animator != null)

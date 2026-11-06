@@ -10,12 +10,14 @@ namespace NetPulse.Editor
         private SerializedProperty _ownershipMode;
         private SerializedProperty _sceneId;
         private SerializedProperty _interestGroup;
+        private SerializedProperty _persistAcrossScenes;
 
         public override void OnInspectorGUI()
         {
             serializedObject.Update();
             EditorGUILayout.PropertyField(_ownershipMode);
             EditorGUILayout.PropertyField(_interestGroup);
+            EditorGUILayout.PropertyField(_persistAcrossScenes, new GUIContent("Persist Across Scenes", "Keep this object when the master loads a new network scene (DontDestroyOnLoad). Must be a root object."));
             DrawSceneObject();
             serializedObject.ApplyModifiedProperties();
             DrawRuntime();
@@ -26,6 +28,7 @@ namespace NetPulse.Editor
             _ownershipMode = serializedObject.FindProperty("_ownershipMode");
             _sceneId = serializedObject.FindProperty("_sceneId");
             _interestGroup = serializedObject.FindProperty("_interestGroup");
+            _persistAcrossScenes = serializedObject.FindProperty("_persistAcrossScenes");
         }
 
         private void DrawSceneObject()

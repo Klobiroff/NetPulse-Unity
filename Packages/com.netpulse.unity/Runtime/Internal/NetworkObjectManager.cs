@@ -7,11 +7,14 @@ using Object = UnityEngine.Object;
 
 namespace NetPulse
 {
-    internal sealed class NetworkObjectManager
+    internal sealed class NetworkObjectManager : ISceneObjectHost
     {
         private const int ViewIdsPerActor = 1000;
         private const float KeepAliveSeconds = 1f;
+        private const double InitialStateTimeoutSeconds = 1d;
+        private const int MaxTicksPerFrame = 5;
         private const byte RpcKindBehaviour = 0;
+        private const byte RpcKindGenerated = 1;
 
         private static readonly DeliveryMode[] DeliveryModes =
         {
@@ -24,10 +27,17 @@ namespace NetPulse
         private readonly NetPulseClient _client;
         private readonly Dictionary<int, NetworkObject> _objects = new();
         private readonly List<NetworkObject> _tickList = new();
+        private readonly List<NetworkObject> _processList = new();
+        private readonly List<NetworkObject> _awaiting = new();
+        private readonly List<PendingOwnership> _pendingOwnership = new();
+        private readonly HashSet<NetworkBehaviour> _dirtyMasterBehaviours = new();
+        private readonly List<NetworkBehaviour> _masterScratch = new();
         private readonly NetWriter _writer = new(256);
         private readonly NetWriter _scratch = new(128);
         private int _counter;
-        private float _accumulator;
+        private long _lastTick;
+        private bool _tickStarted;
+        private bool _forceSend;
         private bool _sceneRegistrationPending;
 
         public NetworkObjectManager(NetPulseClient client)
@@ -44,6 +54,7 @@ namespace NetPulse
             events.OnPlayerEnteredRoom += OnPlayerEntered;
             events.OnPlayerLeftRoom += OnPlayerLeft;
             events.OnMasterClientSwitched += OnMasterSwitched;
+            events.OnMasterChangedRaw += OnMasterChanged;
         }
 
         public int Count => _objects.Count;
@@ -65,7 +76,7 @@ namespace NetPulse
 
             _objects[no.ViewId] = no;
             _sceneRegistrationPending = _client.IsInRoom;
-            no.Spawn();
+            SpawnObject(no);
         }
 
         public void Unregister(NetworkObject no)
@@ -73,6 +84,18 @@ namespace NetPulse
             if (no.ViewId != 0 && _objects.TryGetValue(no.ViewId, out var existing) && existing == no)
             {
                 _objects.Remove(no.ViewId);
+            }
+
+            _awaiting.Remove(no);
+        }
+
+        public void MarkMasterVarsDirty(NetworkBehaviour behaviour) => _dirtyMasterBehaviours.Add(behaviour);
+
+        public void FlushSceneRegistrationIfMaster()
+        {
+            if (_sceneRegistrationPending && _client.IsInRoom && !_client.OfflineMode && _client.CurrentRoom.MasterClientId == _client.LocalActorId)
+            {
+                FlushSceneRegistration();
             }
         }
 
@@ -116,6 +139,8 @@ namespace NetPulse
             if (go.TryGetComponent<NetworkObject>(out var spawned))
             {
                 options.OwnershipMode = (ObjectOwnershipMode)(byte)spawned.OwnershipMode;
+                options.ObjectFlags = spawned.PersistAcrossScenes ? ObjectFlag.PersistAcrossScenes : (byte)0;
+                TagOut(spawned, StatCategory.NetworkObject, null);
             }
 
             _client.RaiseRoomEvent(EventCode.ObjectInstantiate, _writer.ToArray(), options, viewId);
@@ -147,6 +172,7 @@ namespace NetPulse
                 _writer.Reset();
                 _writer.WriteInt(no.ViewId);
                 var options = new RaiseEventOptions { Receivers = ReceiverGroup.Others, Caching = CachingOption.RemoveFromRoomCache, InterestGroup = no.InterestGroup };
+                TagOut(no, StatCategory.NetworkObject, null);
                 _client.RaiseRoomEvent(EventCode.ObjectDestroy, _writer.ToArray(), options, no.ViewId);
             }
 
@@ -168,56 +194,95 @@ namespace NetPulse
                 return;
             }
 
-            var localActor = _client.LocalActorId;
-            var room = _client.CurrentRoom;
-            var invokeLocal = target is RpcTarget.All or RpcTarget.AllBuffered
-                || (target == RpcTarget.MasterClient && room.MasterClientId == localActor)
-                || (target == RpcTarget.Owner && no.EffectiveOwnerActorId == localActor);
-            var options = new RaiseEventOptions { InterestGroup = no.InterestGroup };
-            var send = true;
-            switch (target)
+            if (rpc.OwnerOnly && !no.IsMine)
             {
-                case RpcTarget.MasterClient:
-                    options.Receivers = ReceiverGroup.MasterClient;
-                    send = room.MasterClientId != localActor;
-                    break;
-                case RpcTarget.Owner:
-                    options.Receivers = ReceiverGroup.Targets;
-                    options.TargetActors = new[] { no.EffectiveOwnerActorId };
-                    send = no.EffectiveOwnerActorId != localActor;
-                    break;
-                case RpcTarget.AllBuffered:
-                case RpcTarget.OthersBuffered:
-                    options.Receivers = ReceiverGroup.Others;
-                    options.Caching = CachingOption.AddToRoomCache;
-                    break;
-                default:
-                    options.Receivers = ReceiverGroup.Others;
-                    break;
+                Debug.LogWarning($"[NetPulse] RPC '{rpc.Method.Name}' is OwnerOnly and was not sent because this client does not own '{no.name}'.", behaviour);
+                return;
             }
 
-            if (invokeLocal)
+            var localActor = _client.LocalActorId;
+            var room = _client.CurrentRoom;
+            var plan = ResolveTarget(no, target, null);
+            plan.Options.Delivery = rpc.Delivery;
+            if (plan.Send && !_client.OfflineMode)
+            {
+                _writer.Reset();
+                _writer.WriteByte(RpcKindBehaviour);
+                _writer.WriteInt(no.ViewId);
+                _writer.WriteByte((byte)behaviour.BehaviourIndex);
+                _writer.WriteInt(rpc.Id);
+                _writer.WriteByte((byte)arguments.Length);
+                foreach (var argument in arguments)
+                {
+                    _writer.WriteObject(argument);
+                }
+
+                TagOut(no, StatCategory.Rpc, rpc.StatName);
+                _client.RaiseRoomEvent(EventCode.Rpc, _writer.ToArray(), plan.Options, plan.Options.Caching == CachingOption.DoNotCache ? 0 : no.ViewId);
+            }
+
+            if (plan.InvokeLocal)
             {
                 Invoke(behaviour, rpc, arguments, new NetRpcInfo(room.LocalPlayer, localActor, _client.ServerTime));
             }
+        }
 
-            if (!send || _client.OfflineMode)
+        public void SendGeneratedRpc(NetworkObject no, NetworkBehaviour behaviour, ushort rpcId, RpcTarget? target, Player player, NetWriter args, DeliveryMode delivery, bool ownerOnly)
+        {
+            if (!no.IsSpawned || !_client.IsInRoom)
+            {
+                Debug.LogError($"[NetPulse] {behaviour.GetType().Name}: an RPC requires a spawned object in a joined room.", behaviour);
+                return;
+            }
+
+            var needsInfo = !target.HasValue || _client.Stats.Enabled;
+            RpcMethodInfo info = null;
+            if (needsInfo)
+            {
+                behaviour.TypeInfo.TryGetGeneratedRpc(rpcId, out info);
+            }
+
+            if (ownerOnly && !no.IsMine)
+            {
+                Debug.LogWarning($"[NetPulse] {behaviour.GetType().Name}: an OwnerOnly RPC was not sent because this client does not own '{no.name}'.", behaviour);
+                return;
+            }
+
+            var resolved = target ?? (info != null ? info.DefaultTarget : RpcTarget.All);
+            var localActor = _client.LocalActorId;
+            var room = _client.CurrentRoom;
+            var plan = ResolveTarget(no, resolved, player);
+            plan.Options.Delivery = delivery;
+            if (plan.Send && !_client.OfflineMode)
+            {
+                _writer.Reset();
+                _writer.WriteByte(RpcKindGenerated);
+                _writer.WriteInt(no.ViewId);
+                _writer.WriteByte((byte)behaviour.BehaviourIndex);
+                _writer.WriteUShort(rpcId);
+                _writer.WriteRaw(args.AsSpan());
+                TagOut(no, StatCategory.Rpc, info != null ? info.StatName : null);
+                _client.RaiseRoomEvent(EventCode.Rpc, _writer.ToArray(), plan.Options, plan.Options.Caching == CachingOption.DoNotCache ? 0 : no.ViewId);
+            }
+
+            if (!plan.InvokeLocal)
             {
                 return;
             }
 
-            _writer.Reset();
-            _writer.WriteByte(RpcKindBehaviour);
-            _writer.WriteInt(no.ViewId);
-            _writer.WriteByte((byte)behaviour.BehaviourIndex);
-            _writer.WriteInt(rpc.Id);
-            _writer.WriteByte((byte)arguments.Length);
-            foreach (var argument in arguments)
+            var reader = new NetReader(args.AsSegment());
+            var rpcInfo = new NetRpcInfo(room.LocalPlayer, localActor, _client.ServerTime);
+            try
             {
-                _writer.WriteObject(argument);
+                if (!behaviour.DispatchGeneratedRpc(rpcId, reader, in rpcInfo))
+                {
+                    Debug.LogError($"[NetPulse] {behaviour.GetType().Name} has no generated RPC with id {rpcId}. Is the class 'partial' and the NetPulse source generator active?", behaviour);
+                }
             }
-
-            _client.RaiseRoomEvent(EventCode.Rpc, _writer.ToArray(), options, options.Caching == CachingOption.DoNotCache ? 0 : no.ViewId);
+            catch (Exception e)
+            {
+                Debug.LogException(e, behaviour);
+            }
         }
 
         public void RequestOwnership(NetworkObject no)
@@ -236,6 +301,33 @@ namespace NetPulse
             _client.RequestOwnership(no.ViewId);
         }
 
+        public NetOperation<bool> RequestOwnershipAsync(NetworkObject no, float timeoutSeconds)
+        {
+            var operation = new NetOperation<bool>();
+            if (!_client.IsInRoom)
+            {
+                operation.Complete(false);
+                return operation;
+            }
+
+            if (no.IsMine)
+            {
+                operation.Complete(true);
+                return operation;
+            }
+
+            if (no.OwnershipMode == OwnershipMode.Fixed)
+            {
+                Debug.LogWarning($"[NetPulse] '{no.name}' has Fixed ownership; it cannot be requested.", no);
+                operation.Complete(false);
+                return operation;
+            }
+
+            TrackOwnership(no, _client.LocalActorId, timeoutSeconds, operation);
+            _client.RequestOwnership(no.ViewId);
+            return operation;
+        }
+
         public void TransferOwnership(NetworkObject no, Player newOwner)
         {
             if (!_client.IsInRoom)
@@ -252,35 +344,357 @@ namespace NetPulse
             _client.TransferOwnership(no.ViewId, newOwner.ActorId);
         }
 
+        public NetOperation<bool> TransferOwnershipAsync(NetworkObject no, Player newOwner, float timeoutSeconds)
+        {
+            var operation = new NetOperation<bool>();
+            if (!_client.IsInRoom)
+            {
+                operation.Complete(false);
+                return operation;
+            }
+
+            if (no.EffectiveOwnerActorId == newOwner.ActorId)
+            {
+                operation.Complete(true);
+                return operation;
+            }
+
+            if (no.OwnershipMode == OwnershipMode.Fixed)
+            {
+                Debug.LogWarning($"[NetPulse] '{no.name}' has Fixed ownership; it cannot change owner.", no);
+                operation.Complete(false);
+                return operation;
+            }
+
+            TrackOwnership(no, newOwner.ActorId, timeoutSeconds, operation);
+            _client.TransferOwnership(no.ViewId, newOwner.ActorId);
+            return operation;
+        }
+
         public void Tick(float deltaTime)
         {
-            if (!_client.IsInRoom || _client.OfflineMode)
+            if (!_client.IsInRoom)
             {
+                _tickStarted = false;
                 return;
             }
 
-            if (_sceneRegistrationPending && _client.CurrentRoom.MasterClientId == _client.LocalActorId)
+            CheckInitialStateTimeouts();
+            if (!_client.OfflineMode)
             {
-                FlushSceneRegistration();
+                if (_sceneRegistrationPending && !_client.IsDispatchSuspended && _client.CurrentRoom.MasterClientId == _client.LocalActorId)
+                {
+                    FlushSceneRegistration();
+                }
+
+                FlushMasterVars();
             }
 
-            if (_objects.Count == 0)
-            {
-                return;
-            }
+            RunTicks();
+        }
 
-            var settings = NetPulseSettings.Instance;
-            var interval = 1f / Mathf.Max(1, Mathf.Min(settings.SendRate, settings.SerializationRate));
-            _accumulator += deltaTime;
-            if (_accumulator < interval)
-            {
-                return;
-            }
+        public void Reset()
+        {
+            DestroyNetworkObjects(null);
+            _counter = 0;
+            _tickStarted = false;
+            _forceSend = false;
+            _awaiting.Clear();
+            _dirtyMasterBehaviours.Clear();
+            CancelPendingOwnership();
+        }
 
-            _accumulator %= interval;
+        public void BeginSceneChange()
+        {
             _tickList.Clear();
-            _tickList.AddRange(_objects.Values);
+            foreach (var pair in _objects)
+            {
+                var no = pair.Value;
+                if (no != null && !no.IsSceneObject && !no.PersistAcrossScenes)
+                {
+                    _tickList.Add(no);
+                }
+            }
+
             foreach (var no in _tickList)
+            {
+                _objects.Remove(no.ViewId);
+                _awaiting.Remove(no);
+                Object.Destroy(no.gameObject);
+            }
+
+            _tickList.Clear();
+            _dirtyMasterBehaviours.Clear();
+        }
+
+        public void ApproveOwnership(NetworkObject no, Player requester)
+        {
+            if (!_client.IsInRoom || !no.IsMine)
+            {
+                Debug.LogWarning($"[NetPulse] Only the current owner can approve ownership of '{no.name}'.", no);
+                return;
+            }
+
+            _client.TransferOwnership(no.ViewId, requester.ActorId);
+        }
+
+        private TargetPlan ResolveTarget(NetworkObject no, RpcTarget target, Player player)
+        {
+            var localActor = _client.LocalActorId;
+            var room = _client.CurrentRoom;
+            var options = new RaiseEventOptions { InterestGroup = no.InterestGroup };
+            if (player != null)
+            {
+                options.Receivers = ReceiverGroup.Targets;
+                options.TargetActors = new[] { player.ActorId };
+                return new TargetPlan(player.ActorId == localActor, player.ActorId != localActor, options);
+            }
+
+            switch (target)
+            {
+                case RpcTarget.MasterClient:
+                    options.Receivers = ReceiverGroup.MasterClient;
+                    return new TargetPlan(room.MasterClientId == localActor, room.MasterClientId != localActor, options);
+                case RpcTarget.Owner:
+                    options.Receivers = ReceiverGroup.Targets;
+                    options.TargetActors = new[] { no.EffectiveOwnerActorId };
+                    return new TargetPlan(no.EffectiveOwnerActorId == localActor, no.EffectiveOwnerActorId != localActor, options);
+                case RpcTarget.AllBuffered:
+                    options.Receivers = ReceiverGroup.Others;
+                    options.Caching = CachingOption.AddToRoomCache;
+                    return new TargetPlan(true, true, options);
+                case RpcTarget.OthersBuffered:
+                    options.Receivers = ReceiverGroup.Others;
+                    options.Caching = CachingOption.AddToRoomCache;
+                    return new TargetPlan(false, true, options);
+                case RpcTarget.All:
+                    options.Receivers = ReceiverGroup.Others;
+                    return new TargetPlan(true, true, options);
+                default:
+                    options.Receivers = ReceiverGroup.Others;
+                    return new TargetPlan(false, true, options);
+            }
+        }
+
+        private void TagOut(NetworkObject no, StatCategory category, string name)
+        {
+            var stats = _client.Stats;
+            if (!stats.Enabled)
+            {
+                return;
+            }
+
+            if (name != null)
+            {
+                stats.Tag(category, name);
+            }
+
+            stats.Tag(StatCategory.NetworkObject, no.StatName);
+        }
+
+        private void RecordIn(NetworkObject no, StatCategory category, string name)
+        {
+            var stats = _client.Stats;
+            if (!stats.Enabled)
+            {
+                return;
+            }
+
+            if (name != null)
+            {
+                stats.RecordIn(category, name);
+            }
+
+            if (no != null)
+            {
+                stats.RecordIn(StatCategory.NetworkObject, no.StatName);
+            }
+        }
+
+        private void SpawnObject(NetworkObject no)
+        {
+            no.Spawn(_client.Now + InitialStateTimeoutSeconds);
+            if (no.IsAwaitingInitialState)
+            {
+                _awaiting.Add(no);
+            }
+        }
+
+        private void CheckInitialStateTimeouts()
+        {
+            if (_awaiting.Count == 0)
+            {
+                return;
+            }
+
+            var now = _client.Now;
+            for (var i = _awaiting.Count - 1; i >= 0; i--)
+            {
+                var no = _awaiting[i];
+                if (no == null || !no.IsAwaitingInitialState)
+                {
+                    _awaiting.RemoveAt(i);
+                    continue;
+                }
+
+                if (now < no.InitialStateDeadline)
+                {
+                    continue;
+                }
+
+                _awaiting.RemoveAt(i);
+                no.CompleteInitialState();
+            }
+        }
+
+        private void CompleteInitialState(NetworkObject no)
+        {
+            if (!no.IsAwaitingInitialState)
+            {
+                return;
+            }
+
+            _awaiting.Remove(no);
+            no.CompleteInitialState();
+        }
+
+        private void TrackOwnership(NetworkObject no, int targetActor, float timeoutSeconds, NetOperation<bool> operation)
+        {
+            var pending = new PendingOwnership(no.ViewId, targetActor, operation);
+            _pendingOwnership.Add(pending);
+            var deadline = _client.Now + Math.Max(0.01d, timeoutSeconds);
+            operation.SetCancelHandler(() => _pendingOwnership.Remove(pending));
+            _client.Schedule(() =>
+            {
+                if (operation.IsDone)
+                {
+                    return true;
+                }
+
+                if (_client.Now < deadline)
+                {
+                    return false;
+                }
+
+                _pendingOwnership.Remove(pending);
+                operation.Complete(false);
+                return true;
+            });
+        }
+
+        private void ResolveOwnership(int viewId, int newOwner)
+        {
+            for (var i = _pendingOwnership.Count - 1; i >= 0; i--)
+            {
+                var pending = _pendingOwnership[i];
+                if (pending.ViewId != viewId || pending.TargetActor != newOwner)
+                {
+                    continue;
+                }
+
+                _pendingOwnership.RemoveAt(i);
+                pending.Operation.Complete(true);
+            }
+        }
+
+        private void FailOwnership(int viewId)
+        {
+            for (var i = _pendingOwnership.Count - 1; i >= 0; i--)
+            {
+                var pending = _pendingOwnership[i];
+                if (viewId != 0 && pending.ViewId != viewId)
+                {
+                    continue;
+                }
+
+                _pendingOwnership.RemoveAt(i);
+                pending.Operation.Complete(false);
+            }
+        }
+
+        private void CancelPendingOwnership()
+        {
+            FailOwnership(0);
+        }
+
+        private void RunTicks()
+        {
+            var current = _client.CurrentTick;
+            if (!_tickStarted)
+            {
+                _tickStarted = true;
+                _lastTick = current;
+                return;
+            }
+
+            var pending = current - _lastTick;
+            if (pending <= 0)
+            {
+                if (pending < -_client.TickRate)
+                {
+                    _lastTick = current;
+                }
+
+                return;
+            }
+
+            if (pending > _client.TickRate)
+            {
+                _lastTick = current - MaxTicksPerFrame;
+                pending = MaxTicksPerFrame;
+            }
+
+            var count = (int)Math.Min(pending, MaxTicksPerFrame);
+            for (var i = 0; i < count; i++)
+            {
+                _lastTick++;
+                ProcessTick(_lastTick);
+            }
+        }
+
+        private void ProcessTick(long tick)
+        {
+            _processList.Clear();
+            _processList.AddRange(_objects.Values);
+            foreach (var no in _processList)
+            {
+                if (no == null || !no.IsSpawnNotified)
+                {
+                    continue;
+                }
+
+                foreach (var behaviour in no.Behaviours)
+                {
+                    if (behaviour == null)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        behaviour.OnNetworkTick(tick);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogException(e, behaviour);
+                    }
+                }
+            }
+
+            if (_client.OfflineMode || !_client.IsInRoom)
+            {
+                return;
+            }
+
+            if (!_forceSend && tick % TicksPerSend() != 0)
+            {
+                return;
+            }
+
+            _forceSend = false;
+            _processList.Clear();
+            _processList.AddRange(_objects.Values);
+            foreach (var no in _processList)
             {
                 if (no != null && no.IsSpawned && no.IsMine)
                 {
@@ -289,11 +703,12 @@ namespace NetPulse
             }
         }
 
-        public void Reset()
+        private long TicksPerSend()
         {
-            DestroyNetworkObjects(null);
-            _counter = 0;
-            _accumulator = 0f;
+            var settings = NetPulseSettings.Instance;
+            var serialization = settings.SerializationRate > 0 ? settings.SerializationRate : _client.TickRate;
+            var rate = Mathf.Max(1, Mathf.Min(settings.SendRate, serialization));
+            return Mathf.Max(1, Mathf.RoundToInt(_client.TickRate / (float)rate));
         }
 
         private GameObject Spawn(GameObject prefab, int viewId, int ownerActorId, int prefabId, Vector3 position, Quaternion rotation, object data)
@@ -308,7 +723,7 @@ namespace NetPulse
             }
 
             _objects[viewId] = no;
-            no.Spawn();
+            SpawnObject(no);
             return go;
         }
 
@@ -354,7 +769,7 @@ namespace NetPulse
                 for (var i = 0; i < behaviours.Count; i++)
                 {
                     var behaviour = behaviours[i];
-                    if (behaviour == null || behaviour.Delivery != mode || !behaviour.TypeInfo.HasState)
+                    if (behaviour == null || behaviour.Delivery != mode || !behaviour.HasState)
                     {
                         continue;
                     }
@@ -378,8 +793,56 @@ namespace NetPulse
                 }
 
                 var options = new RaiseEventOptions { Receivers = ReceiverGroup.Others, InterestGroup = no.InterestGroup, Delivery = mode };
+                TagOut(no, StatCategory.StateSync, "StateSync");
                 _client.RaiseRoomEvent(EventCode.StateSync, _writer.ToArray(), options, no.ViewId);
             }
+        }
+
+        private void FlushMasterVars()
+        {
+            if (_dirtyMasterBehaviours.Count == 0)
+            {
+                return;
+            }
+
+            _masterScratch.Clear();
+            _masterScratch.AddRange(_dirtyMasterBehaviours);
+            _dirtyMasterBehaviours.Clear();
+            if (_client.CurrentRoom.MasterClientId != _client.LocalActorId)
+            {
+                return;
+            }
+
+            foreach (var behaviour in _masterScratch)
+            {
+                if (behaviour != null && behaviour.IsSpawned)
+                {
+                    SendMasterVars(behaviour, null, false);
+                }
+            }
+        }
+
+        private void SendMasterVars(NetworkBehaviour behaviour, int[] targets, bool full)
+        {
+            _writer.Reset();
+            if (!behaviour.WriteMasterVars(_writer, full))
+            {
+                return;
+            }
+
+            var options = new RaiseEventOptions { InterestGroup = behaviour.NetworkObject.InterestGroup };
+            if (targets == null)
+            {
+                options.Receivers = ReceiverGroup.Others;
+            }
+            else
+            {
+                options.Receivers = ReceiverGroup.Targets;
+                options.TargetActors = targets;
+            }
+
+            TagOut(behaviour.NetworkObject, StatCategory.SyncVar, behaviour.TypeInfo.TypeName);
+            _client.RaiseRoomEvent(EventCode.SyncVarSet, _writer.ToArray(), options, behaviour.ViewId);
         }
 
         private void OnRoomEvent(byte code, int sender, object data, int viewId)
@@ -405,6 +868,9 @@ namespace NetPulse
                         break;
                     case EventCode.StateSync:
                         ReceiveState(reader, sender);
+                        break;
+                    case EventCode.SyncVarSet:
+                        ReceiveSyncVars(reader, sender);
                         break;
                 }
             }
@@ -435,42 +901,53 @@ namespace NetPulse
                 return;
             }
 
-            Spawn(prefab, viewId, owner, prefabId, position, rotation, data);
+            var spawned = Spawn(prefab, viewId, owner, prefabId, position, rotation, data);
+            if (spawned != null && spawned.TryGetComponent<NetworkObject>(out var no))
+            {
+                RecordIn(no, StatCategory.NetworkObject, null);
+            }
         }
 
         private void ReceiveDestroy(int viewId)
         {
             if (_objects.TryGetValue(viewId, out var no) && no != null && !no.IsSceneObject)
             {
+                RecordIn(no, StatCategory.NetworkObject, null);
                 Object.Destroy(no.gameObject);
             }
         }
 
         private void ReceiveRpc(NetReader reader, int sender)
         {
-            reader.ReadByte();
+            var kind = reader.ReadByte();
             var viewId = reader.ReadInt();
             if (!_objects.TryGetValue(viewId, out var no) || no == null)
             {
                 return;
             }
 
-
             var index = reader.ReadByte();
-            var methodId = reader.ReadInt();
-            var argumentCount = reader.ReadByte();
             if (index >= no.Behaviours.Count || no.Behaviours[index] == null)
             {
                 return;
             }
 
             var behaviour = no.Behaviours[index];
+            if (kind == RpcKindGenerated)
+            {
+                ReceiveGeneratedRpc(reader, sender, no, behaviour);
+                return;
+            }
+
+            var methodId = reader.ReadInt();
+            var argumentCount = reader.ReadByte();
             if (!behaviour.TypeInfo.TryGetRpc(methodId, out var rpc))
             {
                 Debug.LogError($"[NetPulse] Received an RPC (id {methodId}) that {behaviour.GetType().FullName} does not define. The method is missing on this client: version mismatch, or it was stripped by IL2CPP - fix: rebuild with NetPulse link.xml generation active (NetPulse > Tools > Preview IL2CPP link.xml) or mark the method [NetRpc].", behaviour);
                 return;
             }
 
+            RecordIn(no, StatCategory.Rpc, rpc.StatName);
             var arguments = new object[argumentCount];
             for (var i = 0; i < argumentCount; i++)
             {
@@ -479,6 +956,23 @@ namespace NetPulse
 
             var room = _client.CurrentRoom;
             Invoke(behaviour, rpc, arguments, new NetRpcInfo(room?.GetPlayer(sender), sender, _client.ServerTime));
+        }
+
+        private void ReceiveGeneratedRpc(NetReader reader, int sender, NetworkObject no, NetworkBehaviour behaviour)
+        {
+            var rpcId = reader.ReadUShort();
+            if (_client.Stats.Enabled)
+            {
+                behaviour.TypeInfo.TryGetGeneratedRpc(rpcId, out var rpc);
+                RecordIn(no, StatCategory.Rpc, rpc != null ? rpc.StatName : null);
+            }
+
+            var room = _client.CurrentRoom;
+            var info = new NetRpcInfo(room?.GetPlayer(sender), sender, _client.ServerTime);
+            if (!behaviour.DispatchGeneratedRpc(rpcId, reader, in info))
+            {
+                Debug.LogError($"[NetPulse] Received an RPC (id {rpcId}) that {behaviour.GetType().FullName} does not define. The sender runs a different version, or the class is not 'partial' and the NetPulse source generator is inactive on this client.", behaviour);
+            }
         }
 
         private void ReceiveState(NetReader reader, int sender)
@@ -490,6 +984,7 @@ namespace NetPulse
                 return;
             }
 
+            RecordIn(no, StatCategory.StateSync, "StateSync");
             while (reader.Remaining > 0)
             {
                 var index = reader.ReadByte();
@@ -508,17 +1003,55 @@ namespace NetPulse
                     Debug.LogException(e, no.Behaviours[index]);
                 }
             }
+
+            CompleteInitialState(no);
         }
 
-        public void ApproveOwnership(NetworkObject no, Player requester)
+        private void ReceiveSyncVars(NetReader reader, int sender)
         {
-            if (!_client.IsInRoom || !no.IsMine)
+            var room = _client.CurrentRoom;
+            if (room == null || sender != room.MasterClientId)
             {
-                Debug.LogWarning($"[NetPulse] Only the current owner can approve ownership of '{no.name}'.", no);
                 return;
             }
 
-            _client.TransferOwnership(no.ViewId, requester.ActorId);
+            NetworkObject touched = null;
+            while (reader.Remaining > 0)
+            {
+                var viewId = reader.ReadInt();
+                var packed = reader.ReadUShort();
+                if (!_objects.TryGetValue(viewId, out var no) || no == null)
+                {
+                    return;
+                }
+
+                var behaviourIndex = packed >> 8;
+                if (behaviourIndex >= no.Behaviours.Count || no.Behaviours[behaviourIndex] == null)
+                {
+                    return;
+                }
+
+                if (touched == null)
+                {
+                    touched = no;
+                    RecordIn(no, StatCategory.SyncVar, no.Behaviours[behaviourIndex].TypeInfo.TypeName);
+                }
+
+                try
+                {
+                    no.Behaviours[behaviourIndex].ReadMasterVar(packed & 0xFF, reader);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogException(e, no.Behaviours[behaviourIndex]);
+                    return;
+                }
+            }
+
+            if (touched != null)
+            {
+                CompleteInitialState(touched);
+            }
         }
 
         private void OnOwnershipRequested(int viewId, int requesterActorId)
@@ -545,8 +1078,11 @@ namespace NetPulse
             }
         }
 
-        private void OnOwnershipFailed(int viewId, short code, string message) =>
+        private void OnOwnershipFailed(int viewId, short code, string message)
+        {
+            FailOwnership(viewId);
             _client.Events.PublishOwnershipFailed(Find(viewId), code, message);
+        }
 
         private void FlushSceneRegistration()
         {
@@ -568,19 +1104,30 @@ namespace NetPulse
             }
         }
 
-        private void OnJoinedRoom() => _sceneRegistrationPending = true;
+        private void OnJoinedRoom()
+        {
+            _sceneRegistrationPending = true;
+            _tickStarted = false;
+        }
 
         private void OnOwnershipChanged(int viewId, int newOwner, int sender)
         {
-            if (!_objects.TryGetValue(viewId, out var no) || no == null || no.OwnerActorId == newOwner)
+            if (_objects.TryGetValue(viewId, out var no) && no != null && no.OwnerActorId != newOwner)
             {
-                return;
+                no.ChangeOwner(newOwner);
             }
 
-            no.ChangeOwner(newOwner);
+            ResolveOwnership(viewId, newOwner);
         }
 
-        private void OnLeftRoom() => DestroyNetworkObjects(null);
+        private void OnLeftRoom()
+        {
+            DestroyNetworkObjects(null);
+            _awaiting.Clear();
+            _dirtyMasterBehaviours.Clear();
+            _tickStarted = false;
+            CancelPendingOwnership();
+        }
 
         private void OnPlayerEntered(Player player)
         {
@@ -592,7 +1139,30 @@ namespace NetPulse
                 }
             }
 
-            _accumulator = 1f;
+            _forceSend = true;
+            if (_client.OfflineMode || _client.CurrentRoom.MasterClientId != _client.LocalActorId)
+            {
+                return;
+            }
+
+            var targets = new[] { player.ActorId };
+            _tickList.Clear();
+            _tickList.AddRange(_objects.Values);
+            foreach (var no in _tickList)
+            {
+                if (no == null || !no.IsSpawned)
+                {
+                    continue;
+                }
+
+                foreach (var behaviour in no.Behaviours)
+                {
+                    if (behaviour != null && behaviour.HasMasterVars)
+                    {
+                        SendMasterVars(behaviour, targets, true);
+                    }
+                }
+            }
         }
 
         private void OnPlayerLeft(Player player)
@@ -615,6 +1185,19 @@ namespace NetPulse
                 if (no != null && no.IsSceneObject && no.OwnerActorId == ownerActorId)
                 {
                     no.ChangeOwner(0);
+                }
+            }
+        }
+
+        private void OnMasterChanged(Player previous, Player current)
+        {
+            _tickList.Clear();
+            _tickList.AddRange(_objects.Values);
+            foreach (var no in _tickList)
+            {
+                if (no != null && no.IsSpawnNotified)
+                {
+                    no.NotifyMasterChanged(previous, current);
                 }
             }
         }
@@ -692,6 +1275,38 @@ namespace NetPulse
             }
 
             return Convert.ChangeType(value, target, System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        private readonly struct TargetPlan
+        {
+            public TargetPlan(bool invokeLocal, bool send, RaiseEventOptions options)
+            {
+                InvokeLocal = invokeLocal;
+                Send = send;
+                Options = options;
+            }
+
+            public bool InvokeLocal { get; }
+
+            public bool Send { get; }
+
+            public RaiseEventOptions Options { get; }
+        }
+
+        private sealed class PendingOwnership
+        {
+            public PendingOwnership(int viewId, int targetActor, NetOperation<bool> operation)
+            {
+                ViewId = viewId;
+                TargetActor = targetActor;
+                Operation = operation;
+            }
+
+            public int ViewId { get; }
+
+            public int TargetActor { get; }
+
+            public NetOperation<bool> Operation { get; }
         }
     }
 }

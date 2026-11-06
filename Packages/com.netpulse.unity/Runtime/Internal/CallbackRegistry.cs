@@ -35,6 +35,7 @@ namespace NetPulse
             events.OnOwnershipRequest += (networkObject, requester) => Each<IOwnershipCallbacks>(t => t.OnOwnershipRequest(networkObject, requester));
             events.OnOwnershipChanged += (networkObject, previous, current) => Each<IOwnershipCallbacks>(t => t.OnOwnershipChanged(networkObject, previous, current));
             events.OnOwnershipFailed += (networkObject, code, message) => Each<IOwnershipCallbacks>(t => t.OnOwnershipFailed(networkObject, code, message));
+            events.OnNetworkSceneLoaded += sceneName => Each<ISceneCallbacks>(t => t.OnNetworkSceneLoaded(sceneName));
             events.OnEvent += (code, sender, data) => Each<IOnEventCallback>(t => t.OnEvent(code, sender, data));
         }
 

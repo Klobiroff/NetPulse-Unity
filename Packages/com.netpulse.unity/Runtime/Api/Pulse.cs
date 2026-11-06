@@ -11,8 +11,10 @@ namespace NetPulse
 
         private static NetPulseClient _client;
         private static NetworkObjectManager _objects;
+        private static NetworkSceneManager _scenes;
         private static CallbackRegistry _callbacks;
         private static INetTransport _customTransport;
+        private static Func<double> _customClock;
         private static GameObject _runner;
         private static string _nickName;
         private static string _authToken;
@@ -38,6 +40,14 @@ namespace NetPulse
         public static string UserId => _client != null && !string.IsNullOrEmpty(_client.UserId) ? _client.UserId : ResolveUserId(NetPulseSettings.Instance);
 
         public static double ServerTime => _client?.ServerTime ?? 0d;
+
+        public static NetStats Stats => Client.Stats;
+
+        public static int TickRate => _client?.TickRate ?? 0;
+
+        public static long Tick => _client?.CurrentTick ?? 0L;
+
+        public static double TickDelta => _client?.TickDelta ?? 0d;
 
         public static int RoundTripTimeMs => _client?.RoundTripTimeMs ?? 0;
 
@@ -81,6 +91,15 @@ namespace NetPulse
 
         internal static NetworkObjectManager ObjectsOrNull => _objects;
 
+        internal static NetworkSceneManager Scenes
+        {
+            get
+            {
+                EnsureInitialized();
+                return _scenes;
+            }
+        }
+
         public static event Action<NetState> StateChanged
         {
             add => Client.Events.OnStateChanged += value;
@@ -104,6 +123,12 @@ namespace NetPulse
             ResetClient();
         }
 
+        internal static void UseClock(Func<double> clock)
+        {
+            _customClock = clock;
+            ResetClient();
+        }
+
         public static NetOperation Connect() => Connect(NetPulseSettings.Instance);
 
         public static NetOperation Connect(NetPulseSettings settings)
@@ -114,6 +139,7 @@ namespace NetPulse
             var nick = string.IsNullOrEmpty(NickName) ? "Player" + UnityEngine.Random.Range(1000, 9999) : NickName;
             var options = ConnectionOptions.From(settings, ResolveUserId(settings), nick);
             options.AuthToken = _authToken;
+            ApplySettings(settings);
             return Client.Connect(options);
         }
 
@@ -143,6 +169,23 @@ namespace NetPulse
         public static void RaiseEvent(byte eventCode, object data, RaiseEventOptions options = null) => Client.RaiseEvent(eventCode, data, options);
 
         public static void ChangeInterestGroups(byte[] add, byte[] remove) => Client.ChangeInterestGroups(add, remove);
+
+        public static void Send<T>(in T message, RpcTarget target = RpcTarget.Others) where T : INetMessage => Client.Messages.Send(in message, target, null, null);
+
+        public static void Send<T>(in T message, RpcTarget target, MessageOptions options) where T : INetMessage => Client.Messages.Send(in message, target, null, options);
+
+        public static void Send<T>(in T message, Player player, MessageOptions options = null) where T : INetMessage =>
+            Client.Messages.Send(in message, RpcTarget.Others, player ?? throw new ArgumentNullException(nameof(player)), options);
+
+        public static IDisposable On<T>(Action<T, Player> handler) where T : INetMessage => Client.Messages.On(handler);
+
+        public static NetOperation LoadScene(string sceneName) => Scenes.LoadScene(sceneName);
+
+        public static NetOperation LoadScene(int buildIndex) => Scenes.LoadScene(buildIndex);
+
+        public static NetOperation WaitForPlayersAsync(int count) => Client.WaitForPlayers(count);
+
+        public static NetOperation WaitUntilAsync(Func<bool> condition) => Client.WaitUntil(condition);
 
         public static void AddCallbackTarget(object target)
         {
@@ -187,6 +230,17 @@ namespace NetPulse
 
         public static NetworkObject FindObject(int viewId) => _objects?.Find(viewId);
 
+        private static void ApplySettings(NetPulseSettings settings)
+        {
+            if (_client == null || settings == null)
+            {
+                return;
+            }
+
+            _client.Stats.Enabled = settings.CollectStats;
+            _client.AutoSyncScene = settings.AutoSyncScene;
+        }
+
         private static string ResolveUserId(NetPulseSettings settings)
         {
             if (!settings.PersistUserId)
@@ -213,8 +267,10 @@ namespace NetPulse
             }
 
             UnityTypeSerializers.Register();
-            _client = new NetPulseClient(_customTransport ?? new LiteNetLibTransport());
+            _client = new NetPulseClient(_customTransport ?? new LiteNetLibTransport(), _customClock);
             _objects = new NetworkObjectManager(_client);
+            _scenes = new NetworkSceneManager(_client, _objects, new UnitySceneLoader());
+            ApplySettings(NetPulseSettings.Instance);
             _callbacks = new CallbackRegistry(_client.Events);
             if (Application.isPlaying && _runner == null)
             {
@@ -229,6 +285,7 @@ namespace NetPulse
             _client?.Disconnect();
             _client = null;
             _objects = null;
+            _scenes = null;
             _callbacks = null;
         }
 
@@ -237,6 +294,7 @@ namespace NetPulse
         {
             ResetClient();
             _customTransport = null;
+            _customClock = null;
             _nickName = null;
             _authToken = null;
             if (_runner != null)

@@ -122,7 +122,7 @@ namespace NetPulse.Tests
             new(time, new Vector3(x, 0f, 0f), Quaternion.identity, Vector3.one, Vector3.zero);
     }
 
-    public sealed class NetworkTypeInfoTests
+    public sealed partial class NetworkTypeInfoTests
     {
         [Test]
         public void Rpc_LookupByNameAndStableId()
@@ -196,11 +196,13 @@ namespace NetPulse.Tests
             }
         }
 
-        public sealed class SampleBehaviour : NetworkBehaviour
+        public sealed partial class SampleBehaviour : NetworkBehaviour
         {
             [Synced] public int Health;
             [Synced] public string Name;
+#pragma warning disable NP0010
             [Synced] public object Unsupported;
+#pragma warning restore NP0010
             public int NotSynced;
 
             [NetRpc]

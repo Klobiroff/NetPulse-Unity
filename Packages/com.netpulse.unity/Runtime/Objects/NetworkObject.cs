@@ -31,10 +31,15 @@ namespace NetPulse
         [SerializeField] private OwnershipMode _ownershipMode = OwnershipMode.Fixed;
         [SerializeField] private int _sceneId = 0;
         [SerializeField] private byte _interestGroup = 0;
+        [SerializeField] private bool _persistAcrossScenes;
 
         private NetworkBehaviour[] _behaviours = Array.Empty<NetworkBehaviour>();
         private int _viewId;
         private bool _registered;
+        private bool _spawnNotified;
+        private bool _awaitingInitialState;
+        private double _initialStateDeadline;
+        private string _statName;
 
         public event Action<NetworkObject, Player, Player> OwnershipChanged;
 
@@ -42,6 +47,12 @@ namespace NetPulse
         {
             get => _ownershipMode;
             set => _ownershipMode = value;
+        }
+
+        public bool PersistAcrossScenes
+        {
+            get => _persistAcrossScenes;
+            set => _persistAcrossScenes = value;
         }
 
         public int SceneId => _sceneId;
@@ -80,9 +91,22 @@ namespace NetPulse
 
         public bool IsMine => !Pulse.IsInRoom || EffectiveOwnerActorId == Pulse.LocalActorId;
 
+        internal bool IsSpawnNotified => _spawnNotified;
+
+        internal bool IsAwaitingInitialState => _awaitingInitialState;
+
+        internal double InitialStateDeadline => _initialStateDeadline;
+
+        internal string StatName => _statName ??= $"{_viewId} {name}";
+
         public void RequestOwnership() => Pulse.Objects.RequestOwnership(this);
 
+        public NetOperation<bool> RequestOwnershipAsync(float timeoutSeconds = 5f) => Pulse.Objects.RequestOwnershipAsync(this, timeoutSeconds);
+
         public void TransferOwnership(Player newOwner) => Pulse.Objects.TransferOwnership(this, newOwner ?? throw new ArgumentNullException(nameof(newOwner)));
+
+        public NetOperation<bool> TransferOwnershipAsync(Player newOwner, float timeoutSeconds = 5f) =>
+            Pulse.Objects.TransferOwnershipAsync(this, newOwner ?? throw new ArgumentNullException(nameof(newOwner)), timeoutSeconds);
 
         public void ApproveOwnership(Player requester) => Pulse.Objects.ApproveOwnership(this, requester ?? throw new ArgumentNullException(nameof(requester)));
 
@@ -90,7 +114,7 @@ namespace NetPulse
 
         internal static void SetPendingSpawn(SpawnContext context) => PendingSpawn = context;
 
-        internal void Spawn()
+        internal void Spawn(double initialStateDeadline)
         {
             if (_registered)
             {
@@ -98,10 +122,30 @@ namespace NetPulse
             }
 
             _registered = true;
-            foreach (var behaviour in _behaviours)
+            if (_persistAcrossScenes && !IsSceneObject && transform.parent == null)
             {
-                behaviour.OnNetworkSpawned();
+                DontDestroyOnLoad(gameObject);
             }
+
+            if (!IsMine && HasInitialState())
+            {
+                _awaitingInitialState = true;
+                _initialStateDeadline = initialStateDeadline;
+                return;
+            }
+
+            NotifySpawned();
+        }
+
+        internal void CompleteInitialState()
+        {
+            if (!_awaitingInitialState)
+            {
+                return;
+            }
+
+            _awaitingInitialState = false;
+            NotifySpawned();
         }
 
         internal void Despawn()
@@ -112,6 +156,13 @@ namespace NetPulse
             }
 
             _registered = false;
+            _awaitingInitialState = false;
+            if (!_spawnNotified)
+            {
+                return;
+            }
+
+            _spawnNotified = false;
             foreach (var behaviour in _behaviours)
             {
                 if (behaviour != null)
@@ -125,16 +176,55 @@ namespace NetPulse
         {
             var room = Pulse.CurrentRoom;
             var previous = Owner;
+            var wasMine = IsMine;
             OwnerActorId = newOwnerActorId;
             var current = room?.GetPlayer(newOwnerActorId);
+            var isMine = IsMine;
             foreach (var behaviour in _behaviours)
             {
+                if (behaviour == null)
+                {
+                    continue;
+                }
+
                 behaviour.OnOwnerChanged(previous, current);
+                if (!wasMine && isMine)
+                {
+                    behaviour.OnOwnershipGained();
+                }
+                else if (wasMine && !isMine)
+                {
+                    behaviour.OnOwnershipLost();
+                }
+
                 behaviour.ForceFullSync();
             }
 
             OwnershipChanged?.Invoke(this, previous, current);
             Pulse.ClientOrNull?.Events.PublishOwnershipChanged(this, previous, current);
+        }
+
+        internal void NotifyMasterChanged(Player previous, Player current)
+        {
+            var wasMine = previous != null && IsSceneObject && OwnerActorId == 0 && previous.IsLocal;
+            var isMine = current != null && IsSceneObject && OwnerActorId == 0 && current.IsLocal;
+            foreach (var behaviour in _behaviours)
+            {
+                if (behaviour == null)
+                {
+                    continue;
+                }
+
+                behaviour.OnMasterChanged(previous, current);
+                if (!wasMine && isMine)
+                {
+                    behaviour.OnOwnershipGained();
+                }
+                else if (wasMine && !isMine)
+                {
+                    behaviour.OnOwnershipLost();
+                }
+            }
         }
 
         internal void ForceFullSync()
@@ -145,12 +235,43 @@ namespace NetPulse
             }
         }
 
+        private bool HasInitialState()
+        {
+            foreach (var behaviour in _behaviours)
+            {
+                if (behaviour != null && behaviour.HasInitialState)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void NotifySpawned()
+        {
+            if (_spawnNotified)
+            {
+                return;
+            }
+
+            _spawnNotified = true;
+            foreach (var behaviour in _behaviours)
+            {
+                if (behaviour != null)
+                {
+                    behaviour.OnNetworkSpawned();
+                }
+            }
+        }
+
         private void Awake()
         {
             _behaviours = GetComponentsInChildren<NetworkBehaviour>(true);
             for (var i = 0; i < _behaviours.Length; i++)
             {
                 _behaviours[i].BehaviourIndex = i;
+                _behaviours[i].CollectSyncVars();
             }
 
             if (PendingSpawn != null)

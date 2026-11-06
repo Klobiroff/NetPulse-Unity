@@ -16,6 +16,13 @@ namespace NetPulse.Editor
             "NetPulse.LiteNetLib"
         };
 
+        private static readonly string[] BehaviourReflectedMethods =
+        {
+            "OnSerialize",
+            "RegisterSyncVars",
+            "InvokeGeneratedRpc"
+        };
+
         private const BindingFlags AllMembers = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
 
         public static string Generate(Func<string, bool> includeAssembly, bool includePackageAssemblies)
@@ -23,7 +30,9 @@ namespace NetPulse.Editor
             var methods = new List<MethodInfo>(TypeCache.GetMethodsWithAttribute<NetRpcAttribute>());
             var behaviours = new List<Type>(TypeCache.GetTypesDerivedFrom<NetworkBehaviour>());
             var serializables = new List<Type>(TypeCache.GetTypesDerivedFrom<INetSerializable>());
-            return Build(methods, behaviours, serializables, includeAssembly, includePackageAssemblies);
+            var netTypes = new List<Type>(TypeCache.GetTypesWithAttribute<NetSerializableAttribute>());
+            netTypes.AddRange(TypeCache.GetTypesDerivedFrom<INetMessage>());
+            return Build(methods, behaviours, serializables, includeAssembly, includePackageAssemblies, netTypes);
         }
 
         internal static string Build(
@@ -31,7 +40,8 @@ namespace NetPulse.Editor
             IEnumerable<Type> behaviours,
             IEnumerable<Type> serializables,
             Func<string, bool> includeAssembly,
-            bool includePackageAssemblies)
+            bool includePackageAssemblies,
+            IEnumerable<Type> netTypes = null)
         {
             var assemblies = new SortedDictionary<string, SortedDictionary<string, TypeEntry>>(StringComparer.Ordinal);
             foreach (var method in rpcMethods)
@@ -59,6 +69,17 @@ namespace NetPulse.Editor
                 AddType(assemblies, type, includeAssembly);
             }
 
+            if (netTypes != null)
+            {
+                foreach (var type in netTypes)
+                {
+                    if (!type.IsAbstract && !type.IsInterface)
+                    {
+                        AddNetType(assemblies, type, includeAssembly);
+                    }
+                }
+            }
+
             return Write(assemblies, includePackageAssemblies);
         }
 
@@ -77,10 +98,27 @@ namespace NetPulse.Editor
 
                 foreach (var method in current.GetMethods(AllMembers))
                 {
-                    if (method.Name == nameof(NetworkBehaviour.OnSerialize) || method.IsDefined(typeof(NetRpcAttribute), false))
+                    if (Array.IndexOf(BehaviourReflectedMethods, method.Name) >= 0 || method.IsDefined(typeof(NetRpcAttribute), false))
                     {
                         AddMethod(assemblies, method, includeAssembly);
                     }
+                }
+            }
+        }
+
+        private static void AddNetType(SortedDictionary<string, SortedDictionary<string, TypeEntry>> assemblies, Type type, Func<string, bool> includeAssembly)
+        {
+            var entry = GetEntry(assemblies, type, includeAssembly);
+            if (entry == null)
+            {
+                return;
+            }
+
+            foreach (var method in type.GetMethods(AllMembers))
+            {
+                if (method.Name == "NetWrite" || method.Name == "NetRead")
+                {
+                    entry.Methods.Add(Signature(method));
                 }
             }
         }

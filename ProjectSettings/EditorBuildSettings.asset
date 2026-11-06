@@ -8,6 +8,9 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/NetPulse Basic Sample/BasicSample.unity
     guid: c3986f041118b824d9aad4b1409521dd
+  - enabled: 1
+    path: Assets/NetPulse Basic Sample/BasicSampleArena.unity
+    guid: 34a380dc4f01d63488693eca7e83b636
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 289c1b55c9541489481df5cc06664110, type: 3}
   m_UseUCBPForAssetBundles: 0
