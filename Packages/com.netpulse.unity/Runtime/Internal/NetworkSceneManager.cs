@@ -53,6 +53,7 @@ namespace NetPulse
         private int _currentLoadId;
         private int _token;
         private bool _loading;
+        private NetOperation _pendingOperation;
 
         public NetworkSceneManager(NetPulseClient client, ISceneObjectHost objects, ISceneLoader loader)
         {
@@ -134,6 +135,7 @@ namespace NetPulse
 
         private void OnJoinedRoom()
         {
+            CancelPending("Joined another room before the network scene finished loading");
             _currentLoadId = 0;
             _loading = false;
             _token++;
@@ -169,6 +171,8 @@ namespace NetPulse
 
         private void BeginLoad(string spec, NetOperation operation)
         {
+            CancelPending("Superseded by a newer network scene load");
+            _pendingOperation = operation;
             var token = ++_token;
             if (!_loading)
             {
@@ -188,6 +192,7 @@ namespace NetPulse
             }
 
             _loading = false;
+            _pendingOperation = null;
             if (sceneName == null)
             {
                 Debug.LogError("[NetPulse] The network scene could not be loaded. Is it added to Build Settings?");
@@ -204,9 +209,20 @@ namespace NetPulse
 
         private void Reset()
         {
+            CancelPending("Left the room before the network scene finished loading");
             _loading = false;
             _currentLoadId = 0;
             _token++;
+        }
+
+        private void CancelPending(string reason)
+        {
+            var pending = _pendingOperation;
+            _pendingOperation = null;
+            if (pending != null && !pending.IsDone)
+            {
+                pending.Fail(NetPulseReturnCode.Cancelled, reason);
+            }
         }
     }
 }

@@ -703,13 +703,7 @@ namespace NetPulse
             }
         }
 
-        private long TicksPerSend()
-        {
-            var settings = NetPulseSettings.Instance;
-            var serialization = settings.SerializationRate > 0 ? settings.SerializationRate : _client.TickRate;
-            var rate = Mathf.Max(1, Mathf.Min(settings.SendRate, serialization));
-            return Mathf.Max(1, Mathf.RoundToInt(_client.TickRate / (float)rate));
-        }
+        private long TicksPerSend() => StateSendRate.TicksPerSend(NetPulseSettings.Instance, _client.TickRate);
 
         private GameObject Spawn(GameObject prefab, int viewId, int ownerActorId, int prefabId, Vector3 position, Quaternion rotation, object data)
         {

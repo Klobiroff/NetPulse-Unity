@@ -14,7 +14,7 @@ GameObject:
   - component: {fileID: 2778182212411940339}
   - component: {fileID: 2507185062603772258}
   - component: {fileID: 3801571494576768655}
-  - component: {fileID: 2836800487923226800}
+  - component: {fileID: 8114090902162945112}
   m_Layer: 0
   m_Name: SamplePlayer
   m_TagString: Untagged
@@ -154,7 +154,7 @@ MonoBehaviour:
   _extrapolate: 0
   _maxExtrapolationTime: 0.25
   _teleportDistance: 0
---- !u!114 &2836800487923226800
+--- !u!114 &8114090902162945112
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -163,7 +163,7 @@ MonoBehaviour:
   m_GameObject: {fileID: 1802542209738646804}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 38d0248a80e644f44a19e7bdd5c55144, type: 3}
+  m_Script: {fileID: 11500000, guid: f9be5bc4db75a9c40bd4fe06b5500838, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::NetPulse.Samples.Basic.SamplePlayer
   _speed: 5

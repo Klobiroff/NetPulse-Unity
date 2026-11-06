@@ -61,7 +61,7 @@ namespace NetPulse
                 return;
             }
 
-            var delay = _interpolationDelay > 0f ? _interpolationDelay : 2f / Mathf.Max(1, NetPulseSettings.Instance.SerializationRate);
+            var delay = _interpolationDelay > 0f ? _interpolationDelay : StateSendRate.DefaultInterpolationDelay();
             if (!_buffer.TrySample(Pulse.ServerTime - delay, true, 0.25d, out var snapshot))
             {
                 return;

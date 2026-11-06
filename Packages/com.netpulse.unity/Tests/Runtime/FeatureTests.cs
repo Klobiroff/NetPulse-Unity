@@ -517,5 +517,89 @@ namespace NetPulse.Tests
             };
             _transport.Respond(_transport.NextRequest(), ReturnCode.Ok, response.ToParameters());
         }
+
+        [Test]
+        public void InterpolationDelay_UsesServerTickWhenSerializationRateIsZero()
+        {
+            Assert.AreEqual(2f * 2f / 30f, StateSendRate.InterpolationDelay(20, 0, 30), 0.0001f);
+            Assert.AreEqual(2f * 3f / 30f, StateSendRate.InterpolationDelay(20, 10, 30), 0.0001f);
+            Assert.Less(StateSendRate.InterpolationDelay(60, 0, 30), 0.1f);
+        }
+
+        [Test]
+        public void RoomKey_SetRollsBackWhenServerRejects()
+        {
+            JoinRoom(1, 1);
+            var key = new RoomKey<int>("hp");
+            var seen = new List<int>();
+            _client.CurrentRoom.OnChanged(key, seen.Add);
+
+            _client.CurrentRoom.Set(key, 5);
+            Assert.AreEqual(5, _client.CurrentRoom.Get(key));
+            _transport.Respond(_transport.NextRequest(), ReturnCode.Forbidden);
+
+            Assert.AreEqual(0, _client.CurrentRoom.Get(key));
+            Assert.IsFalse(_client.CurrentRoom.Properties.ContainsKey("hp"));
+            CollectionAssert.AreEqual(new[] { 5, 0 }, seen);
+        }
+
+        [Test]
+        public void RoomKey_SetDoesNotRollBackOverANewerValue()
+        {
+            JoinRoom(1, 1);
+            var key = new RoomKey<int>("hp");
+            _client.CurrentRoom.Set(key, 5);
+            var first = _transport.NextRequest();
+            _client.CurrentRoom.Set(key, 6);
+            _transport.Respond(first, ReturnCode.Forbidden);
+
+            Assert.AreEqual(6, _client.CurrentRoom.Get(key));
+        }
+
+        [Test]
+        public void PlayerKey_SetRollsBackWhenServerRejects()
+        {
+            JoinRoom(1, 1);
+            var key = new PlayerKey<string>("team");
+            var player = _client.CurrentRoom.LocalPlayer;
+            player.Set(key, "red");
+            _transport.Respond(_transport.NextRequest(), ReturnCode.Ok);
+            player.Set(key, "blue");
+            _transport.Respond(_transport.NextRequest(), ReturnCode.Forbidden);
+
+            Assert.AreEqual("red", player.Get(key));
+        }
+
+        [Test]
+        public void Scene_SecondLoadCancelsTheFirstOperation()
+        {
+            JoinRoom(1, 1);
+            var loader = new FakeSceneLoader();
+            var scenes = new NetworkSceneManager(_client, new FakeSceneHost(), loader);
+
+            var first = scenes.LoadScene("Arena");
+            var second = scenes.LoadScene("Lobby");
+
+            Assert.IsTrue(first.HasError);
+            Assert.AreEqual(NetPulseReturnCode.Cancelled, first.Error.ReturnCode);
+            Assert.IsFalse(second.IsDone);
+
+            loader.Complete("Lobby");
+
+            Assert.IsTrue(second.IsSuccess);
+        }
+
+        [Test]
+        public void Scene_DisconnectDuringLoadFailsTheOperation()
+        {
+            JoinRoom(1, 1);
+            var scenes = new NetworkSceneManager(_client, new FakeSceneHost(), new FakeSceneLoader());
+            var op = scenes.LoadScene("Arena");
+
+            _client.Disconnect();
+
+            Assert.IsTrue(op.HasError);
+            Assert.AreEqual(NetPulseReturnCode.Cancelled, op.Error.ReturnCode);
+        }
     }
 }

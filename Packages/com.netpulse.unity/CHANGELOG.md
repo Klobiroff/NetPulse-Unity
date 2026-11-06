@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.1] - 2026-11-06
+Fixes.
+- `NetworkTransform` and `NetworkRigidbody`: the automatic interpolation delay is now two real state send intervals (about 0.13 s with the defaults). In 0.3.0 it ignored that `Serialization Rate = 0` means the server tick rate and came out as 2 seconds.
+- `Room.Set`, `Player.Set` and `SetProperty`: when the server rejects the change, the previous value is restored for every key nobody changed since, `OnChanged` fires again, and a warning is logged.
+- `Pulse.LoadScene`: an operation replaced by a newer load, or interrupted by leaving the room or disconnecting, now fails with `NetPulseReturnCode.Cancelled` instead of never completing.
+
 ## [0.3.0] - 2026-11-06
 Lighter API: no strings, byte codes or manual type registration in everyday code. The old low-level API (`CallRpc(string, ...)`, `RaiseEvent`, `[Synced]`, string property keys) keeps working.
 - Roslyn source generator and analyzers (`Runtime/Analyzers/NetPulse.Generators.dll`, ids NP0001-NP0011): `Rpc.Hit(10)`, `Rpc.To(RpcTarget.Others).Hit(10)`, `[NetSerializable]`, `INetMessage`, `SyncVar<T>`. Classes that declare them must be `partial` (`sealed partial` is supported).

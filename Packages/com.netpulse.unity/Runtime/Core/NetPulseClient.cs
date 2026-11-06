@@ -350,7 +350,7 @@ namespace NetPulse
 
             var room = _room;
             var request = new SetPropertiesRequest { ActorId = 0, Properties = properties, ExpectedProperties = expected };
-            return SetProperties(OpCode.SetRoomProperties, request, expected != null, () => ApplyRoomProperties(room, properties));
+            return SetProperties(OpCode.SetRoomProperties, request, expected != null, room.Properties, delta => ApplyRoomProperties(room, delta));
         }
 
         public NetOperation SetPlayerProperties(Player player, PropertyTable properties, PropertyTable expected = null)
@@ -361,7 +361,7 @@ namespace NetPulse
             }
 
             var request = new SetPropertiesRequest { ActorId = player.ActorId, Properties = properties, ExpectedProperties = expected };
-            return SetProperties(OpCode.SetPlayerProperties, request, expected != null, () => ApplyPlayerProperties(player, properties));
+            return SetProperties(OpCode.SetPlayerProperties, request, expected != null, player.Properties, delta => ApplyPlayerProperties(player, delta));
         }
 
         public void ChangeInterestGroups(byte[] add, byte[] remove)
@@ -589,17 +589,20 @@ namespace NetPulse
             return player;
         }
 
-        private NetOperation SetProperties(byte opCode, SetPropertiesRequest request, bool waitForServer, Action applyLocal)
+        private NetOperation SetProperties(byte opCode, SetPropertiesRequest request, bool waitForServer, PropertyTable current, Action<PropertyTable> apply)
         {
+            var delta = request.Properties;
             if (_offlineMode)
             {
-                applyLocal();
+                apply(delta);
                 return NetOperation.Succeeded();
             }
 
+            PropertyTable previous = null;
             if (!waitForServer)
             {
-                applyLocal();
+                previous = CapturePrevious(current, delta);
+                apply(delta);
             }
 
             var operation = new NetOperation();
@@ -607,18 +610,59 @@ namespace NetPulse
             {
                 if (response.ReturnCode != ReturnCode.Ok)
                 {
+                    if (previous != null)
+                    {
+                        RollBack(current, delta, previous, apply, response.ReturnCode);
+                    }
+
                     operation.Fail(response.ReturnCode, response.DebugMessage);
                     return;
                 }
 
                 if (waitForServer)
                 {
-                    applyLocal();
+                    apply(delta);
                 }
 
                 operation.Complete();
             });
             return operation;
+        }
+
+        private static PropertyTable CapturePrevious(PropertyTable current, PropertyTable delta)
+        {
+            var previous = new PropertyTable();
+            if (delta == null)
+            {
+                return previous;
+            }
+
+            foreach (var key in delta.Keys)
+            {
+                previous[key] = current[key];
+            }
+
+            return previous;
+        }
+
+        private static void RollBack(PropertyTable current, PropertyTable delta, PropertyTable previous, Action<PropertyTable> apply, short returnCode)
+        {
+            var restore = new PropertyTable();
+            foreach (var key in previous.Keys)
+            {
+                if (Equals(current[key], delta[key]))
+                {
+                    restore[key] = previous[key];
+                }
+            }
+
+            if (restore.Count == 0)
+            {
+                return;
+            }
+
+            Debug.LogWarning($"[NetPulse] The server rejected a property change ({returnCode}); restored the previous values of: {string.Join(", ", restore.Keys)}");
+            apply(restore);
         }
 
         private void ApplyRoomProperties(Room room, PropertyTable delta)

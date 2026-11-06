@@ -1,6 +1,6 @@
 {
   "name": "com.netpulse.unity",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "displayName": "NetPulse",
   "description": "NetPulse client for Unity: a Photon-like networking solution with a simple async API, rooms, lobby, RPCs, synced objects and server plugins.",
   "unity": "2021.3",

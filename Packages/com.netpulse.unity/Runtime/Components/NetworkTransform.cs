@@ -104,7 +104,7 @@ namespace NetPulse
                 return _interpolationDelay;
             }
 
-            return 2f / Mathf.Max(1, Mathf.Min(NetPulseSettings.Instance.SendRate, NetPulseSettings.Instance.SerializationRate));
+            return StateSendRate.DefaultInterpolationDelay();
         }
 
         private void WriteCurrent(NetStream stream)
