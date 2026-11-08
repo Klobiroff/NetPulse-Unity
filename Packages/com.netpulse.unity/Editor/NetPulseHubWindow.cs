@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using NetPulse.Common.Security;
 using UnityEditor;
 using UnityEngine;
 
@@ -64,6 +65,7 @@ namespace NetPulse.Editor
 
             _scroll = EditorGUILayout.BeginScrollView(_scroll);
             DrawStatus();
+            DrawSecurity();
             DrawControls();
             DrawRoom();
             DrawTraffic();
@@ -241,6 +243,42 @@ namespace NetPulse.Editor
             EditorGUILayout.LabelField("Server time", client == null ? "-" : client.ServerTime.ToString("F2"));
             EditorGUILayout.LabelField("User id", client?.UserId ?? "-");
             EditorGUILayout.LabelField("Nickname", client?.NickName ?? "-");
+        }
+
+        private static void DrawSecurity()
+        {
+            EditorGUILayout.Space();
+            EditorGUILayout.LabelField("Security", EditorStyles.boldLabel);
+            var settings = NetPulseAssets.FindSettings();
+
+            if (settings == null)
+            {
+                EditorGUILayout.LabelField("Encryption", "no settings asset");
+                return;
+            }
+
+            var error = ConnectionOptions.From(settings, null, null).ValidateSecurity();
+            EditorGUILayout.LabelField("Encryption mode", settings.EncryptionMode.ToString());
+            EditorGUILayout.LabelField("Pinned server keys", settings.ServerPublicKeys.Length.ToString());
+
+            if (error != null)
+            {
+                EditorGUILayout.HelpBox(error, MessageType.Error);
+            }
+
+            if (!Application.isPlaying)
+            {
+                return;
+            }
+
+            var client = Pulse.ClientOrNull;
+            var active = client != null && client.IsEncrypted;
+            EditorGUILayout.LabelField("Session", active ? "encrypted" : "not encrypted");
+
+            if (settings.EncryptionMode == ClientEncryptionMode.Required && client != null && client.State != NetState.Disconnected && !active)
+            {
+                EditorGUILayout.HelpBox("Waiting for the secure handshake. If this stays, check the server public key, the pre-shared key and the server encryption mode.", MessageType.Warning);
+            }
         }
 
         private void DrawControls()

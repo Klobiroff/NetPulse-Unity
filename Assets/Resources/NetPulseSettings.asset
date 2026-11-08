@@ -17,11 +17,22 @@ MonoBehaviour:
   _appId: 
   _appVersion: 1.0
   _connectionKey: NetPulse
+  _encryptionMode: 1
+  _serverPublicKeys:
+  - JFLKeQ13kP8JSRZl8uQj7vTRX2ByW2s0wjGncfFyWE0=
+  _preSharedKey: 84ykeIznO55RBZUxPYj8zCzbkpFydAXe2pCXvIreOYw=
+  _rekeyAfterPackets: 1000000
+  _rekeyAfterMs: 600000
+  _replayWindow: 4096
+  _paddingBlock: 0
+  _handshakeTimeout: 5
   _defaultNickName: 
   _persistUserId: 1
   _sendRate: 20
   _serializationRate: 10
   _requestTimeout: 10
   _runInBackground: 1
+  _autoSyncScene: 1
+  _collectStats: 0
   _logVerbose: 0
   _prefabRegistry: {fileID: 11400000, guid: 1a99c5b44ced22d42a977b35d39c7016, type: 2}

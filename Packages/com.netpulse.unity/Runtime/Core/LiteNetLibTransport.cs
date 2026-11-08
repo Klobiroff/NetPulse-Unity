@@ -1,26 +1,25 @@
 using System;
 using LiteNetLib;
 using NetPulse.Common;
+using NetPulse.Common.Security;
 using UnityEngine.Scripting;
 
 namespace NetPulse
 {
     [Preserve]
-    public sealed class LiteNetLibTransport : INetTransport
+    public sealed class LiteNetLibTransport : ISecureNetTransport
     {
         private readonly EventBasedNetListener _listener = new();
-        private readonly NetManager _manager;
+        private readonly SecurityCounters _counters = new();
+        private NetManager _manager;
+        private SecureClientCore _core;
+        private SecureClientSettings _security;
         private NetPeer _peer;
         private bool _connectedRaised;
+        private bool _failureRaised;
 
         public LiteNetLibTransport()
         {
-            _manager = new NetManager(_listener)
-            {
-                DisconnectTimeout = 10000,
-                AutoRecycle = true,
-                UnsyncedEvents = false
-            };
             _listener.PeerConnectedEvent += OnPeerConnected;
             _listener.PeerDisconnectedEvent += OnPeerDisconnected;
             _listener.NetworkReceiveEvent += OnNetworkReceive;
@@ -34,13 +33,22 @@ namespace NetPulse
 
         public bool IsConnected => _peer != null && _peer.ConnectionState == ConnectionState.Connected;
 
+        public bool IsEncrypted => _core != null && _core.Session != null;
+
+        public SecurityCounters Counters => _counters;
+
         public int RoundTripTimeMs => _peer?.RoundTripTime ?? 0;
+
+        public void ConfigureSecurity(SecureClientSettings settings) => _security = settings;
 
         public void Connect(string host, int port, string connectionKey)
         {
             Disconnect();
             _connectedRaised = false;
-            if (!_manager.IsRunning && !_manager.Start())
+            _failureRaised = false;
+            CreateManager();
+
+            if (!_manager.Start())
             {
                 Disconnected?.Invoke("Failed to open a UDP socket");
                 return;
@@ -61,15 +69,18 @@ namespace NetPulse
 
         public void Poll()
         {
-            if (_manager.IsRunning)
+            if (_manager == null || !_manager.IsRunning)
             {
-                _manager.PollEvents();
+                return;
             }
+
+            _manager.PollEvents();
+            CheckSecureFailure();
         }
 
         public void Disconnect()
         {
-            if (_peer == null && !_manager.IsRunning)
+            if (_manager == null)
             {
                 return;
             }
@@ -95,6 +106,65 @@ namespace NetPulse
             _ => NetPulse.Common.DeliveryMode.Unreliable
         };
 
+        private void CreateManager()
+        {
+            _core?.Dispose();
+            _core = null;
+
+            if (_security == null)
+            {
+                _manager = new NetManager(_listener)
+                {
+                    DisconnectTimeout = 10000,
+                    AutoRecycle = true,
+                    UnsyncedEvents = false
+                };
+
+                return;
+            }
+
+            _core = new SecureClientCore(_security, _counters, () => MonotonicClock.NowMs);
+            var layer = new SecureClientLayer(_core);
+            _manager = new NetManager(_listener, layer)
+            {
+                DisconnectTimeout = 10000,
+                AutoRecycle = true,
+                UnsyncedEvents = false
+            };
+
+            layer.Attach(_manager);
+        }
+
+        private void CheckSecureFailure()
+        {
+            if (_core == null || _failureRaised)
+            {
+                return;
+            }
+
+            string reason = null;
+
+            if (_core.State == SecureClientState.Failed || (_core.Session != null && _core.Session.IsClosed))
+            {
+                reason = SecureDisconnectReason.SecureHandshakeFailed;
+            }
+            else if (_core.CheckTimeout())
+            {
+                reason = SecureDisconnectReason.SecureHandshakeTimeout;
+            }
+
+            if (reason == null)
+            {
+                return;
+            }
+
+            _failureRaised = true;
+            _peer = null;
+            _connectedRaised = false;
+            _manager.Stop();
+            Disconnected?.Invoke(reason);
+        }
+
         private void OnPeerConnected(NetPeer peer)
         {
             _peer = peer;
@@ -104,6 +174,11 @@ namespace NetPulse
 
         private void OnPeerDisconnected(NetPeer peer, DisconnectInfo info)
         {
+            if (_failureRaised)
+            {
+                return;
+            }
+
             if (_peer != null && !ReferenceEquals(peer, _peer))
             {
                 return;

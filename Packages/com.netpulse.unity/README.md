@@ -67,4 +67,4 @@ The full documentation lives in the server repository, in [`docs/manual/en/`](ht
 - `unity/analyzers.md` (NP0001 to NP0011), `unity/il2cpp.md`, `unity/settings-and-editor.md`
 - `migrating-from-pun.md`, `troubleshooting.md`
 
-See `CHANGELOG.md` for the version history. The package requires a 0.3 server.
+See `CHANGELOG.md` for the version history. The package requires a 0.4 server. See the security section of the server manual for transport encryption.

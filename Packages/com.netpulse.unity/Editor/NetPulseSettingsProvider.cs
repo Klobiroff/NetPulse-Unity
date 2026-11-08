@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using NetPulse.Common.Security;
 using UnityEditor;
 using UnityEngine;
 
@@ -36,6 +37,23 @@ namespace NetPulse.Editor
         [MenuItem("NetPulse/Open Hub")]
         public static void OpenHub() => NetPulseHubWindow.Open();
 
+        private static void DrawSecurity(NetPulseSettings settings)
+        {
+            EditorGUILayout.Space();
+            var error = ConnectionOptions.From(settings, null, null).ValidateSecurity();
+
+            if (error != null)
+            {
+                EditorGUILayout.HelpBox(error, MessageType.Error);
+                return;
+            }
+
+            var message = settings.EncryptionMode == ClientEncryptionMode.Required
+                ? $"Encryption is required. The client pins {settings.ServerPublicKeys.Length} server key(s) and never sends or accepts plain packets."
+                : "Encryption is off: packets are sent in plaintext. Set Encryption Mode to Required and paste the server public key to protect the traffic.";
+            EditorGUILayout.HelpBox(message, MessageType.Info);
+        }
+
         private static void DrawGui(string searchContext)
         {
             var settings = NetPulseAssets.FindSettings();
@@ -70,6 +88,7 @@ namespace NetPulse.Editor
                 EditorUtility.SetDirty(settings);
             }
 
+            DrawSecurity(settings);
             EditorGUILayout.Space();
             using (new EditorGUILayout.HorizontalScope())
             {

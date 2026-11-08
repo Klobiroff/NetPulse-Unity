@@ -10,6 +10,7 @@ namespace NetPulse
         public const short Disconnected = -101;
         public const short InvalidState = -102;
         public const short Cancelled = -103;
+        public const short InvalidConfiguration = -104;
     }
 
     public sealed class RequestTracker

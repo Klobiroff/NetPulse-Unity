@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using NetPulse.Common;
+using NetPulse.Common.Security;
 using Debug = UnityEngine.Debug;
 
 namespace NetPulse
@@ -23,6 +24,7 @@ namespace NetPulse
         private readonly Dictionary<string, RoomInfo> _lobbyRooms = new();
         private readonly OperationScheduler _scheduler = new();
         private readonly Queue<QueuedRoomEvent> _queuedRoomEvents = new();
+        private readonly Dictionary<string, string> _rejoinTokens = new();
 
         private ConnectionOptions _options = new();
         private NetOperation _connectOperation;
@@ -62,6 +64,8 @@ namespace NetPulse
         public long CurrentTick => (long)Math.Floor(ServerTime * _tickRate);
 
         public NetState State { get; private set; } = NetState.Disconnected;
+
+        public bool IsEncrypted => _transport is ISecureNetTransport secure && secure.IsEncrypted;
 
         public string UserId { get; private set; } = string.Empty;
 
@@ -128,6 +132,12 @@ namespace NetPulse
                 return NetOperation.Succeeded();
             }
 
+            if (!TryConfigureSecurity(options, out var securityError))
+            {
+                Debug.LogError($"[NetPulse] {securityError}");
+                return NetOperation.Failed(NetPulseReturnCode.InvalidConfiguration, securityError);
+            }
+
             _connectOperation = new NetOperation();
             SetState(NetState.Connecting);
             var operation = _connectOperation;
@@ -141,6 +151,32 @@ namespace NetPulse
             }
 
             return operation;
+        }
+
+        private bool TryConfigureSecurity(ConnectionOptions options, out string error)
+        {
+            error = null;
+            var secure = _transport as ISecureNetTransport;
+
+            if (options.EncryptionMode == ClientEncryptionMode.Off)
+            {
+                secure?.ConfigureSecurity(null);
+                return true;
+            }
+
+            if (secure == null)
+            {
+                error = "Encryption is required but the transport does not support it";
+                return false;
+            }
+
+            if (!options.TryBuildSecurity(out var settings, out error))
+            {
+                return false;
+            }
+
+            secure.ConfigureSecurity(settings);
+            return true;
         }
 
         public void Disconnect()
@@ -274,13 +310,13 @@ namespace NetPulse
 
         public NetOperation<Room> JoinRoom(string roomName, PropertyTable playerProperties = null)
         {
-            var request = new JoinRoomRequest { RoomName = roomName, PlayerProperties = playerProperties };
+            var request = new JoinRoomRequest { RoomName = roomName, PlayerProperties = playerProperties, RejoinToken = RejoinTokenFor(roomName) };
             return JoinRoomInternal(OpCode.JoinRoom, request.ToParameters(), null, roomName, false, Events.RaiseJoinRoomFailed);
         }
 
         public NetOperation<Room> JoinOrCreateRoom(string roomName, RoomOptions options = null, PropertyTable playerProperties = null)
         {
-            var request = new JoinOrCreateRoomRequest { RoomName = roomName, Options = options ?? new RoomOptions(), PlayerProperties = playerProperties };
+            var request = new JoinOrCreateRoomRequest { RoomName = roomName, Options = options ?? new RoomOptions(), PlayerProperties = playerProperties, RejoinToken = RejoinTokenFor(roomName) };
             return JoinRoomInternal(OpCode.JoinOrCreateRoom, request.ToParameters(), options, roomName, false, Events.RaiseJoinRoomFailed);
         }
 
@@ -310,9 +346,15 @@ namespace NetPulse
                 return NetOperation.Succeeded();
             }
 
+            var leavingRoom = _room?.Name;
             var operation = new NetOperation();
             Send(OpCode.LeaveRoom, new LeaveRoomRequest { BecomeInactive = becomeInactive }.ToParameters(), response =>
             {
+                if (!becomeInactive && leavingRoom != null)
+                {
+                    _rejoinTokens.Remove(leavingRoom);
+                }
+
                 FinishLeaveRoom();
                 if (response.ReturnCode != ReturnCode.Ok)
                 {
@@ -470,6 +512,24 @@ namespace NetPulse
             Send(OpCode.RaiseEvent, request.ToParameters(), null, options.Delivery);
         }
 
+        private string RejoinTokenFor(string roomName) => roomName != null && _rejoinTokens.TryGetValue(roomName, out var token) ? token : null;
+
+        private void StoreRejoinToken(string roomName, string token)
+        {
+            if (string.IsNullOrEmpty(roomName))
+            {
+                return;
+            }
+
+            if (string.IsNullOrEmpty(token))
+            {
+                _rejoinTokens.Remove(roomName);
+                return;
+            }
+
+            _rejoinTokens[roomName] = token;
+        }
+
         private static double DefaultClock() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
 
         private NetOperation<Room> JoinRoomInternal(byte opCode, ParameterDictionary parameters, RoomOptions options, string roomName, bool isCreate, Action<short, string> raiseFailed)
@@ -506,6 +566,7 @@ namespace NetPulse
                 }
 
                 var joined = JoinRoomResponse.FromParameters(response.Parameters);
+                StoreRejoinToken(joined.RoomName, joined.RejoinToken);
                 var room = BuildRoom(joined);
                 CompleteJoin(operation, room, isCreate || (opCode != OpCode.JoinRoom && joined.Players.Length <= 1 && !joined.IsRejoin));
             });

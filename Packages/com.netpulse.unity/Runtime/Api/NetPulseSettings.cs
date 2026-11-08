@@ -1,3 +1,5 @@
+using System;
+using NetPulse.Common.Security;
 using UnityEngine;
 
 namespace NetPulse
@@ -22,6 +24,21 @@ namespace NetPulse
         [SerializeField] private string _appId = string.Empty;
         [SerializeField] private string _appVersion = "1.0";
         [SerializeField] private string _connectionKey = "NetPulse";
+
+        [Header("Security")]
+        [Tooltip("Required = the client never sends or accepts plain packets. Off = plaintext; use it only against a server whose encryption mode is Disabled or Optional.")]
+        [SerializeField] private ClientEncryptionMode _encryptionMode = ClientEncryptionMode.Off;
+        [Tooltip("Base64 public keys printed by NetPulse.Server keygen. Several keys let you rotate the server key without breaking old builds.")]
+        [SerializeField] private string[] _serverPublicKeys = Array.Empty<string>();
+        [Tooltip("Optional Base64 pre-shared key (32 bytes). It ends up in the build and can be extracted, so it is only an extra gate.")]
+        [SerializeField] private string _preSharedKey = string.Empty;
+        [SerializeField, Min(0)] private long _rekeyAfterPackets = 1000000;
+        [SerializeField, Min(0)] private int _rekeyAfterMs = 600000;
+        [Tooltip("Multiple of 64, 64..65536.")]
+        [SerializeField] private int _replayWindow = 4096;
+        [Tooltip("0 = off, otherwise 16..512. Pads every packet to a multiple of this size to hide message lengths, at the cost of bandwidth. Use the same value on the server.")]
+        [SerializeField] private int _paddingBlock;
+        [SerializeField, Min(0.5f)] private float _handshakeTimeout = 5f;
 
         [Header("Player")]
         [SerializeField] private string _defaultNickName = string.Empty;
@@ -87,6 +104,54 @@ namespace NetPulse
         {
             get => _connectionKey;
             set => _connectionKey = value;
+        }
+
+        public ClientEncryptionMode EncryptionMode
+        {
+            get => _encryptionMode;
+            set => _encryptionMode = value;
+        }
+
+        public string[] ServerPublicKeys
+        {
+            get => _serverPublicKeys;
+            set => _serverPublicKeys = value ?? Array.Empty<string>();
+        }
+
+        public string PreSharedKey
+        {
+            get => _preSharedKey;
+            set => _preSharedKey = value ?? string.Empty;
+        }
+
+        public long RekeyAfterPackets
+        {
+            get => _rekeyAfterPackets;
+            set => _rekeyAfterPackets = value;
+        }
+
+        public int RekeyAfterMs
+        {
+            get => _rekeyAfterMs;
+            set => _rekeyAfterMs = value;
+        }
+
+        public int ReplayWindow
+        {
+            get => _replayWindow;
+            set => _replayWindow = value;
+        }
+
+        public int PaddingBlock
+        {
+            get => _paddingBlock;
+            set => _paddingBlock = value;
+        }
+
+        public float HandshakeTimeout
+        {
+            get => _handshakeTimeout;
+            set => _handshakeTimeout = value;
         }
 
         public string DefaultNickName
