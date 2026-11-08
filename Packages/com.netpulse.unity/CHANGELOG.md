@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0] - 2026-11-08
+Transport encryption. Requires a 0.4 server (NetPulse.Common gained the `Security` folder, `RejoinToken` and the `NetReader` container limit).
+- Encryption of the whole UDP stream: X25519 key agreement with the server's pinned static key (Noise `NK`), ChaCha20-Poly1305 records, replay window, independent rekeying per direction. The primitives are managed code in `Runtime/Common/Security` and work on Mono and IL2CPP; nothing from the BCL AEAD or ECDH classes is used.
+- `NetPulseSettings` / `ConnectionOptions`: `EncryptionMode` (`Off` or `Required`; there is no "prefer encryption" mode), `ServerPublicKeys` (several keys for server key rotation), `PreSharedKey`, `RekeyAfterPackets`, `RekeyAfterMs`, `ReplayWindow`, `PaddingBlock`, `HandshakeTimeout`. `ConnectionOptions.ValidateSecurity()` checks the keys.
+- With `Required` the client never sends and never accepts a plain packet. A missing or malformed key fails `Pulse.Connect` with `NetPulseReturnCode.InvalidConfiguration` (-104) before anything is sent.
+- New disconnect reasons `SecureHandshakeTimeout` and `SecureHandshakeFailed`. A wrong server key, a wrong pre-shared key or a server without encryption all look like a timeout, because the server does not answer.
+- `Pulse.Client.IsEncrypted`. The settings window and the Hub check the key format and show whether the session is encrypted.
+- `LiteNetLibTransport` implements `ISecureNetTransport` and creates its `NetManager` on every `Connect`. `SecureClientLayer` is the `PacketLayerBase` that does the work. Each datagram grows by 26 bytes (more with `Padding Block`).
+- Rejoin tokens: when the server has `RequireRejoinToken` on, the client keeps the token it received for a room and presents it when it joins that room again. Leaving the room without `becomeInactive` forgets it.
+- The server can now disconnect a client with `RateLimited`, `AuthTimeout` and `TooManyAuthAttempts`, and answers `InvalidRequest` to oversized names, properties and tokens.
+- The Basic sample has an "Encrypt traffic" toggle and a field for the server public key.
+- EditMode tests for key validation, settings serialization and the packet layer, and PlayMode tests for the client.
+
 ## [0.3.1] - 2026-11-06
 Fixes.
 - `NetworkTransform` and `NetworkRigidbody`: the automatic interpolation delay is now two real state send intervals (about 0.13 s with the defaults). In 0.3.0 it ignored that `Serialization Rate = 0` means the server tick rate and came out as 2 seconds.

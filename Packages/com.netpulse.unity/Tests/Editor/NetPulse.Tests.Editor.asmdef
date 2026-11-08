@@ -1,7 +1,7 @@
 {
     "name": "NetPulse.Tests.Editor",
     "rootNamespace": "NetPulse.Tests.Editor",
-    "references": [ "NetPulse.Runtime", "NetPulse.Editor", "NetPulse.Common", "UnityEngine.TestRunner", "UnityEditor.TestRunner" ],
+    "references": [ "NetPulse.Runtime", "NetPulse.Editor", "NetPulse.Common", "NetPulse.LiteNetLib", "UnityEngine.TestRunner", "UnityEditor.TestRunner" ],
     "includePlatforms": [ "Editor" ],
     "excludePlatforms": [],
     "allowUnsafeCode": false,

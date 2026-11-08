@@ -3,6 +3,7 @@ using Random = UnityEngine.Random;
 using System.Collections.Generic;
 using NetPulse;
 using NetPulse.Common;
+using NetPulse.Common.Security;
 using UnityEngine;
 
 namespace NetPulse.Samples.Basic
@@ -20,6 +21,8 @@ namespace NetPulse.Samples.Basic
         private string _nickName = "Player";
         private string _host = "127.0.0.1";
         private bool _offline;
+        private bool _encrypt;
+        private string _serverKey = string.Empty;
         private bool _busy;
         private GameObject _localPlayer;
         private Vector2 _roomScroll;
@@ -28,7 +31,13 @@ namespace NetPulse.Samples.Basic
         private IDisposable _chatSubscription;
         private IDisposable _scoreSubscription;
 
-        private void Awake() => DontDestroyOnLoad(gameObject);
+        private void Awake()
+        {
+            DontDestroyOnLoad(gameObject);
+            var settings = NetPulseSettings.Instance;
+            _encrypt = settings.EncryptionMode == ClientEncryptionMode.Required;
+            _serverKey = settings.ServerPublicKeys.Length > 0 ? settings.ServerPublicKeys[0] : string.Empty;
+        }
 
         protected override void OnEnable()
         {
@@ -119,6 +128,15 @@ namespace NetPulse.Samples.Basic
             _host = GUILayout.TextField(_host);
             GUILayout.EndHorizontal();
             _offline = GUILayout.Toggle(_offline, "Offline mode (no server)");
+            _encrypt = GUILayout.Toggle(_encrypt, "Encrypt traffic (needs the server public key)");
+            if (_encrypt)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Server key", GUILayout.Width(70f));
+                _serverKey = GUILayout.TextField(_serverKey);
+                GUILayout.EndHorizontal();
+            }
+
             GUI.enabled = !_busy;
             if (GUILayout.Button("Connect"))
             {
@@ -255,6 +273,12 @@ namespace NetPulse.Samples.Basic
                 Pulse.NickName = _nickName;
                 var options = ConnectionOptions.From(NetPulseSettings.Instance, Pulse.UserId, _nickName);
                 options.Host = _host;
+                options.EncryptionMode = _encrypt ? ClientEncryptionMode.Required : ClientEncryptionMode.Off;
+                if (_encrypt && !string.IsNullOrWhiteSpace(_serverKey))
+                {
+                    options.ServerPublicKeys = new[] { _serverKey.Trim() };
+                }
+
                 await Pulse.Connect(options);
                 if (!_offline)
                 {
